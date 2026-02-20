@@ -90,6 +90,12 @@ setup() {
   [ "$UPDATE_DEFAULT_BRANCH" = "true" ]
 }
 
+@test "parse_args: --no-update-default-branch sets UPDATE_DEFAULT_BRANCH=false" {
+  UPDATE_DEFAULT_BRANCH=true
+  parse_args --no-update-default-branch
+  [ "$UPDATE_DEFAULT_BRANCH" = "false" ]
+}
+
 # ─── unknown option ──────────────────────────────────────────────────────────────
 
 @test "parse_args: unknown option exits with error" {

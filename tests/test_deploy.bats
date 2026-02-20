@@ -236,6 +236,28 @@ EOF
   ! grep -q "4.0.0" "$TEST_TMPDIR/deploy/mf/test-project/5.0.0"
 }
 
+@test "deploy_release: cleans up clone dir when modulefile already exists" {
+  setup_test_repo
+  DRY_RUN=false
+  TAG_PREFIX="v"
+  DEPLOY_BASE_PATH="$TEST_TMPDIR/deploy"
+
+  add_test_commit "feature"
+  push_test_commits
+  create_test_tag "v4.1.0"
+
+  # Pre-create the modulefile (but not the deploy dir)
+  mkdir -p "$TEST_TMPDIR/deploy/mf/test-project"
+  echo "existing" > "$TEST_TMPDIR/deploy/mf/test-project/4.1.0"
+
+  run deploy_release "4.1.0"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Modulefile already exists"* ]]
+
+  # Clone directory should have been cleaned up
+  [ ! -d "$TEST_TMPDIR/deploy/test-project/4.1.0" ]
+}
+
 @test "deploy_release: rejects relative DEPLOY_BASE_PATH" {
   setup_test_repo
   DRY_RUN=false

@@ -33,3 +33,20 @@ TAG_PREFIX=v
 # Git remote name.
 # Env var: RELEASE_REMOTE
 REMOTE=origin
+
+# Verify SSL certificates. Set to false for self-hosted GitLab with
+# self-signed certificates.
+# Env var: GITLAB_VERIFY_SSL
+VERIFY_SSL=true
+
+# Update the GitLab default branch to the release branch after a release.
+# Set to false to skip this step entirely. When true, the script prompts
+# for confirmation (auto-accepted in --non-interactive mode).
+# Env var: RELEASE_UPDATE_DEFAULT_BRANCH
+UPDATE_DEFAULT_BRANCH=true
+
+# Base path for deploy (clone + modulefile). If unset, deploy is skipped.
+# The deploy step clones into DEPLOY_BASE_PATH/<tool>/<version> and writes
+# a modulefile to DEPLOY_BASE_PATH/mf/<tool>/<version>.
+# Env var: DEPLOY_BASE_PATH
+# DEPLOY_BASE_PATH=/opt/software

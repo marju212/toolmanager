@@ -125,7 +125,7 @@ _export_env() {
 
   run bash -c '
     cd "'"$WORK_REPO"'"
-    printf "1\ny\n" | "'"$RELEASE_SCRIPT"'" 2>&1
+    printf "1\ny\ny\n" | "'"$RELEASE_SCRIPT"'" 2>&1
   '
   echo "OUTPUT: $output"
   [ "$status" -eq 0 ]
@@ -159,11 +159,28 @@ _export_env() {
 
   run bash -c '
     cd "'"$WORK_REPO"'"
-    printf "1\ny\n" | "'"$RELEASE_SCRIPT"'" --update-default-branch 2>&1
+    printf "1\ny\ny\n" | "'"$RELEASE_SCRIPT"'" --update-default-branch 2>&1
   '
   echo "OUTPUT: $output"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Default branch updated"* ]]
+}
+
+@test "integration: --no-update-default-branch prevents default branch update" {
+  cd "$WORK_REPO"
+  _export_env
+
+  add_test_commit "No update flag test"
+  push_test_commits
+
+  run bash -c '
+    cd "'"$WORK_REPO"'"
+    printf "1\ny\n" | "'"$RELEASE_SCRIPT"'" --no-update-default-branch 2>&1
+  '
+  echo "OUTPUT: $output"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Updating GitLab default branch"* ]]
+  [[ "$output" != *"Default branch updated"* ]]
 }
 
 # ─── Failure scenarios ───────────────────────────────────────────────────────────

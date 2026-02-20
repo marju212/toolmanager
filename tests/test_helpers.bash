@@ -125,8 +125,8 @@ push_test_commits() {
 # Source the release script in a way that defines all functions but does NOT
 # execute main(). We achieve this by sourcing the file with a guard.
 source_release_functions() {
-  # Override main to prevent execution, then source the script
-  eval "$(sed 's/^main "\$@"$/# main "$@" -- disabled for testing/' "$RELEASE_SCRIPT")"
+  _SOURCED_FOR_TESTING=true
+  source "$RELEASE_SCRIPT"
 }
 
 # ─── Mock GitLab server helpers ──────────────────────────────────────────────────

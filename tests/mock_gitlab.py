@@ -107,6 +107,11 @@ class GitLabHandler(BaseHTTPRequestHandler):
         if self.state.check_scenario("fail_server"):
             self._send_json(500, {"message": "500 Internal Server Error"})
             return True
+        # Persistent variant — stays active until file is manually removed
+        fail_always = os.path.join(self.state.state_dir, "fail_server_always")
+        if os.path.exists(fail_always):
+            self._send_json(500, {"message": "500 Internal Server Error"})
+            return True
         return False
 
     def _route(self, method):

@@ -5,14 +5,16 @@
 # Usage: ./scripts/release.sh [OPTIONS]
 #
 # Options:
-#   --dry-run            Run all checks without making changes
-#   --hotfix-mr BRANCH   Create MR from a release branch back to the default branch
-#   --deploy-only        Deploy an existing tagged release (skip branch/tag creation)
-#   --config FILE        Path to config file
-#   --version X.Y.Z      Set release version non-interactively
-#   --deploy-path PATH   Deploy base path (overrides DEPLOY_BASE_PATH config)
-#   --non-interactive, -n Auto-confirm all prompts (for CI/CD)
-#   --help               Show this help message
+#   --dry-run                  Run all checks without making changes
+#   --hotfix-mr BRANCH         Create MR from a release branch back to the default branch
+#   --deploy-only              Deploy an existing tagged release (skip branch/tag creation)
+#   --update-default-branch    Change GitLab default branch to the release branch (default)
+#   --no-update-default-branch Skip changing the GitLab default branch
+#   --config FILE              Path to config file
+#   --version X.Y.Z            Set release version non-interactively
+#   --deploy-path PATH         Deploy base path (overrides DEPLOY_BASE_PATH config)
+#   --non-interactive, -n      Auto-confirm all prompts (for CI/CD)
+#   --help                     Show this help message
 #
 set -euo pipefail
 
@@ -126,6 +128,17 @@ _parse_remote_url() {
   fi
 }
 
+_warn_file_permissions() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then return; fi
+  local mode
+  mode="$(stat -c '%a' "$file" 2>/dev/null || stat -f '%Lp' "$file" 2>/dev/null)" || return
+  case "$mode" in
+    *00) ;;  # Only owner has access — OK
+    *)   log_warn "'$file' is accessible by others (mode $mode). Consider: chmod 600 '$file'" ;;
+  esac
+}
+
 # ─── Prerequisites ──────────────────────────────────────────────────────────────
 
 check_prerequisites() {
@@ -155,6 +168,7 @@ Options:
   --hotfix-mr BRANCH         Create MR from a release branch back to the default branch
   --deploy-only              Deploy an existing tagged release (skip branch/tag creation)
   --update-default-branch    Change GitLab default branch to the release branch (default: true)
+  --no-update-default-branch Skip changing the GitLab default branch
   --config FILE              Path to config file (default: .release.conf)
   --version X.Y.Z            Set release version non-interactively
   --deploy-path PATH         Deploy base path (overrides DEPLOY_BASE_PATH config)
@@ -220,6 +234,10 @@ parse_args() {
         UPDATE_DEFAULT_BRANCH=true
         shift
         ;;
+      --no-update-default-branch)
+        UPDATE_DEFAULT_BRANCH=false
+        shift
+        ;;
       --config)
         if [[ -z "${2:-}" ]]; then
           log_error "--config requires a file path argument"
@@ -274,6 +292,7 @@ parse_args() {
 _load_conf_file() {
   local file="$1"
   if [[ -f "$file" ]]; then
+    _warn_file_permissions "$file"
     log_info "Loading config: $file"
     # Source in a subshell-safe way: only accept known variables
     local line key value
@@ -286,6 +305,9 @@ _load_conf_file() {
       value="${value%\"}"
       value="${value#\'}"
       value="${value%\'}"
+      # Trim leading and trailing whitespace from value
+      value="${value#"${value%%[![:space:]]*}"}"
+      value="${value%"${value##*[![:space:]]}"}"
       case "$key" in
         GITLAB_TOKEN)       GITLAB_TOKEN="$value" ;;
         GITLAB_API_URL)     GITLAB_API_URL="$value" ;;
@@ -305,6 +327,7 @@ load_config() {
   # 0. Load token from ~/.gitlab_token file if it exists and token is not
   #    already set via environment variable
   if [[ -z "$GITLAB_TOKEN" && -f "$HOME/.gitlab_token" ]]; then
+    _warn_file_permissions "$HOME/.gitlab_token"
     GITLAB_TOKEN="$(<"$HOME/.gitlab_token")"
     # Strip whitespace/newlines
     GITLAB_TOKEN="${GITLAB_TOKEN%"${GITLAB_TOKEN##*[![:space:]]}"}"
@@ -376,7 +399,10 @@ check_branch() {
 
   # Fetch latest from remote
   log_info "Fetching from $REMOTE..."
-  git fetch "$REMOTE" --tags --quiet
+  if ! git fetch "$REMOTE" --tags --quiet; then
+    log_error "Failed to fetch from '$REMOTE'. Check credentials and network connectivity."
+    exit 1
+  fi
 
   # Must be in sync with remote
   local local_sha remote_sha
@@ -429,6 +455,22 @@ suggest_versions() {
   SUGGESTED_MAJOR="$((major + 1)).0.0"
 }
 
+check_version_available() {
+  local version="$1"
+  # Check if tag already exists
+  if git rev-parse "${TAG_PREFIX}${version}" &>/dev/null; then
+    log_error "Tag '${TAG_PREFIX}${version}' already exists."
+    exit 1
+  fi
+  # Check if release branch already exists
+  local branch_name="release/${TAG_PREFIX}${version}"
+  if git rev-parse --verify "$branch_name" &>/dev/null || \
+     git rev-parse --verify "$REMOTE/$branch_name" &>/dev/null; then
+    log_error "Branch '$branch_name' already exists."
+    exit 1
+  fi
+}
+
 prompt_version() {
   local current="$1"
   suggest_versions "$current"
@@ -459,20 +501,7 @@ prompt_version() {
       ;;
   esac
 
-  # Check if tag already exists
-  if git rev-parse "${TAG_PREFIX}${NEW_VERSION}" &>/dev/null; then
-    log_error "Tag '${TAG_PREFIX}${NEW_VERSION}' already exists."
-    exit 1
-  fi
-
-  # Check if release branch already exists
-  local branch_name="release/${TAG_PREFIX}${NEW_VERSION}"
-  if git rev-parse --verify "$branch_name" &>/dev/null || \
-     git rev-parse --verify "$REMOTE/$branch_name" &>/dev/null; then
-    log_error "Branch '$branch_name' already exists."
-    exit 1
-  fi
-
+  check_version_available "$NEW_VERSION"
   log_success "Will release ${TAG_PREFIX}${NEW_VERSION}"
 }
 
@@ -518,7 +547,6 @@ gitlab_api() {
   local response http_code
 
   # Write token header to a temp file to avoid exposing it in process args.
-  # The file is deleted immediately after opening the file descriptor.
   local header_file
   header_file="$(mktemp)"
   printf 'PRIVATE-TOKEN: %s' "$GITLAB_TOKEN" > "$header_file"
@@ -542,16 +570,44 @@ gitlab_api() {
     curl_args+=(--data "$data")
   fi
 
-  if ! response="$(curl "${curl_args[@]}" "$url" 2>&1)"; then
-    rm -f "$header_file"
-    log_error "Failed to connect to GitLab API: $url"
-    log_error "curl error: $response"
-    log_error "Check GITLAB_API_URL, network connectivity, and SSL settings (VERIFY_SSL=false for self-signed certs)."
-    return 1
-  fi
+  local max_retries=1
+  local attempt
+  for (( attempt = 0; attempt <= max_retries; attempt++ )); do
+    if (( attempt > 0 )); then
+      log_warn "Retrying GitLab API request (attempt $((attempt + 1)))..."
+      sleep "${_GITLAB_API_RETRY_DELAY:-2}"
+    fi
+
+    if ! response="$(curl "${curl_args[@]}" "$url" 2>&1)"; then
+      if (( attempt < max_retries )); then continue; fi
+      rm -f "$header_file"
+      log_error "Failed to connect to GitLab API: $url"
+      log_error "curl error: $response"
+      log_error "Check GITLAB_API_URL, network connectivity, and SSL settings (VERIFY_SSL=false for self-signed certs)."
+      return 1
+    fi
+
+    http_code="$(echo "$response" | tail -n1)"
+    response="$(echo "$response" | sed '$d')"
+
+    # Validate http_code is numeric
+    if ! [[ "$http_code" =~ ^[0-9]+$ ]]; then
+      if (( attempt < max_retries )); then continue; fi
+      rm -f "$header_file"
+      log_error "Unexpected response from GitLab API (no HTTP status code)"
+      return 1
+    fi
+
+    # Retry on server errors (5xx)
+    if [[ "$http_code" -ge 500 ]] && (( attempt < max_retries )); then
+      log_warn "GitLab API returned HTTP $http_code, will retry..."
+      continue
+    fi
+
+    break
+  done
+
   rm -f "$header_file"
-  http_code="$(echo "$response" | tail -n1)"
-  response="$(echo "$response" | sed '$d')"
 
   if [[ "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
     log_error "GitLab API error (HTTP $http_code): $endpoint"
@@ -611,7 +667,10 @@ create_merge_request() {
   local source_branch="$1"
   local version="$2"
   local mr_title="${3:-Release ${TAG_PREFIX}${version}}"
-  local mr_desc="${4:-## Release ${TAG_PREFIX}${version}\n\n${CHANGELOG}}"
+  local mr_desc
+  mr_desc="${4:-## Release ${TAG_PREFIX}${version}
+
+${CHANGELOG}}"
 
   log_info "Creating merge request: $source_branch → $DEFAULT_BRANCH"
 
@@ -653,7 +712,10 @@ hotfix_mr_flow() {
   local branch="$HOTFIX_MR_BRANCH"
 
   log_info "Fetching from $REMOTE..."
-  git fetch "$REMOTE" --tags --quiet
+  if ! git fetch "$REMOTE" --tags --quiet; then
+    log_error "Failed to fetch from '$REMOTE'. Check credentials and network connectivity."
+    exit 1
+  fi
 
   # Verify branch exists on remote
   if ! git rev-parse --verify "$REMOTE/$branch" &>/dev/null; then
@@ -700,7 +762,9 @@ hotfix_mr_flow() {
   get_gitlab_project_id
 
   local mr_title="Hotfix ${TAG_PREFIX}${version} merge back to ${DEFAULT_BRANCH}"
-  local mr_desc="## Hotfix ${TAG_PREFIX}${version}\n\n${CHANGELOG}"
+  local mr_desc="## Hotfix ${TAG_PREFIX}${version}
+
+${CHANGELOG}"
   create_merge_request "$branch" "$version" "$mr_title" "$mr_desc"
 
   echo "" >&2
@@ -716,7 +780,10 @@ deploy_only_flow() {
   fi
 
   log_info "Fetching tags from $REMOTE..."
-  git fetch "$REMOTE" --tags --quiet
+  if ! git fetch "$REMOTE" --tags --quiet; then
+    log_error "Failed to fetch from '$REMOTE'. Check credentials and network connectivity."
+    return 1
+  fi
 
   local version=""
   if [[ -n "$CLI_VERSION" ]]; then
@@ -964,6 +1031,10 @@ deploy_release() {
   # Modulefile step
   if [[ -f "$mf_file" ]]; then
     log_error "Modulefile already exists: $mf_file"
+    if ! $DRY_RUN && [[ -d "$deploy_dir" ]]; then
+      log_warn "Removing clone directory due to failed deploy: $deploy_dir"
+      rm -rf "$deploy_dir"
+    fi
     return 1
   else
     # Check for an existing modulefile from a previous version to use as base
@@ -1069,18 +1140,7 @@ main() {
   if [[ -n "$CLI_VERSION" ]]; then
     validate_semver "$CLI_VERSION"
     NEW_VERSION="$CLI_VERSION"
-    # Check if tag already exists
-    if git rev-parse "${TAG_PREFIX}${NEW_VERSION}" &>/dev/null; then
-      log_error "Tag '${TAG_PREFIX}${NEW_VERSION}' already exists."
-      exit 1
-    fi
-    # Check if release branch already exists
-    local branch_name="release/${TAG_PREFIX}${NEW_VERSION}"
-    if git rev-parse --verify "$branch_name" &>/dev/null || \
-       git rev-parse --verify "$REMOTE/$branch_name" &>/dev/null; then
-      log_error "Branch '$branch_name' already exists."
-      exit 1
-    fi
+    check_version_available "$NEW_VERSION"
     log_success "Will release ${TAG_PREFIX}${NEW_VERSION}"
   else
     prompt_version "$current_version"
@@ -1140,4 +1200,6 @@ main() {
   log_success "Release ${release_tag} completed!"
 }
 
-main "$@"
+if [[ "${_SOURCED_FOR_TESTING:-}" != "true" ]]; then
+    main "$@"
+fi

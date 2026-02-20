@@ -7,6 +7,7 @@ setup() {
   start_mock_gitlab
   GITLAB_API_URL="http://127.0.0.1:${MOCK_PORT}/api/v4"
   GITLAB_TOKEN="test-token-12345"
+  _GITLAB_API_RETRY_DELAY=0
 }
 
 teardown() {
@@ -67,9 +68,11 @@ teardown() {
 
 # ─── gitlab_api: server errors ───────────────────────────────────────────────────
 
-@test "gitlab_api: handles 500 server error" {
-  mock_trigger_scenario "fail_server"
+@test "gitlab_api: handles persistent 500 server error" {
+  # Use persistent failure so both initial request and retry get 500
+  touch "$MOCK_STATE_DIR/fail_server_always"
   run gitlab_api GET "/projects/12345"
+  rm -f "$MOCK_STATE_DIR/fail_server_always"
   [ "$status" -ne 0 ]
   [[ "$output" == *"500"* ]]
 }
@@ -81,6 +84,17 @@ teardown() {
   run gitlab_api GET "/projects/99999"
   [ "$status" -ne 0 ]
   [[ "$output" == *"404"* ]]
+}
+
+# ─── gitlab_api: retry on 500 ─────────────────────────────────────────────────────
+
+@test "gitlab_api: retries on 500 and succeeds on second attempt" {
+  # fail_server is one-shot: first request gets 500, retry succeeds
+  mock_trigger_scenario "fail_server"
+  run gitlab_api GET "/projects/12345"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Retrying"* ]]
+  [[ "$output" == *"12345"* ]]
 }
 
 # ─── SEC-1: token not exposed in process args ────────────────────────────────────

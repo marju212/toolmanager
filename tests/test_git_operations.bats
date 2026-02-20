@@ -259,6 +259,42 @@ teardown() {
 
 # ─── confirm ─────────────────────────────────────────────────────────────────────
 
+# ─── check_version_available ─────────────────────────────────────────────────
+
+@test "check_version_available: succeeds when tag and branch do not exist" {
+  cd "$WORK_REPO"
+  TAG_PREFIX="v"
+  REMOTE="origin"
+  run check_version_available "9.9.9"
+  [ "$status" -eq 0 ]
+}
+
+@test "check_version_available: fails when tag already exists" {
+  cd "$WORK_REPO"
+  TAG_PREFIX="v"
+  REMOTE="origin"
+  add_test_commit "first"
+  git tag -a "v1.0.0" -m "v1.0.0"
+
+  run check_version_available "1.0.0"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Tag 'v1.0.0' already exists"* ]]
+}
+
+@test "check_version_available: fails when branch already exists" {
+  cd "$WORK_REPO"
+  TAG_PREFIX="v"
+  REMOTE="origin"
+  git checkout -b "release/v2.0.0" >/dev/null 2>&1
+  git checkout main >/dev/null 2>&1
+
+  run check_version_available "2.0.0"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Branch 'release/v2.0.0' already exists"* ]]
+}
+
+# ─── confirm ─────────────────────────────────────────────────────────────────────
+
 @test "confirm: dry-run always succeeds" {
   DRY_RUN=true
   run confirm "Proceed?"

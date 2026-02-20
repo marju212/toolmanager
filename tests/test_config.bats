@@ -283,6 +283,21 @@ EOF
   [ "$DEPLOY_BASE_PATH" = "/opt/from-env" ]
 }
 
+@test "load_config: trims whitespace from config values" {
+  cat > "$TEST_TMPDIR/.release.conf" <<'EOF'
+GITLAB_API_URL=https://example.com/api/v4
+DEFAULT_BRANCH=  develop
+EOF
+
+  REPO_ROOT="$TEST_TMPDIR"
+  CONFIG_FILE=""
+  _ENV_GITLAB_API_URL=""
+  _ENV_RELEASE_DEFAULT_BRANCH=""
+  load_config
+  [ "$GITLAB_API_URL" = "https://example.com/api/v4" ]
+  [ "$DEFAULT_BRANCH" = "develop" ]
+}
+
 @test "load_config: CLI --deploy-path overrides env var and config" {
   cat > "$TEST_TMPDIR/.release.conf" <<'EOF'
 DEPLOY_BASE_PATH=/opt/from-config

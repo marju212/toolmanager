@@ -1,11 +1,18 @@
 # Example GitLab CI jobs for running release.sh non-interactively.
 #
+# Prerequisites:
+#   - Set GITLAB_TOKEN as a CI/CD variable (Settings > CI/CD > Variables)
+#     with api scope. Mark it as "Masked" and optionally "Protected".
+#
 # Trigger the release job manually from the GitLab UI by setting RELEASE_VERSION
 # (e.g. "1.2.3"). The job will create a release branch and tag.
 #
 # Trigger the hotfix-mr job by setting HOTFIX_BRANCH (e.g. "release/v1.2.3").
 # The job will create a merge request from the release branch back to the
 # default branch.
+#
+# Trigger the deploy job by setting DEPLOY_VERSION (e.g. "1.2.3").
+# The job will deploy an existing tagged release.
 
 release:
   stage: deploy
@@ -40,5 +47,21 @@ hotfix-mr:
     - ./scripts/release.sh --hotfix-mr "$HOTFIX_BRANCH" --non-interactive
   rules:
     - if: '$HOTFIX_BRANCH'
+      when: manual
+  allow_failure: false
+
+deploy:
+  stage: deploy
+  image: alpine:latest
+  variables:
+    GIT_DEPTH: 0
+  before_script:
+    - apk add --no-cache bash git curl jq
+    - git fetch --unshallow 2>/dev/null || true
+    - git fetch --tags
+  script:
+    - ./scripts/release.sh --deploy-only --version "$DEPLOY_VERSION" --non-interactive
+  rules:
+    - if: '$DEPLOY_VERSION'
       when: manual
   allow_failure: false

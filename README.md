@@ -25,11 +25,11 @@ A **GitLab personal access token** with `api` scope is required for API operatio
 # Create a release (interactive version prompt)
 ./scripts/release.sh
 
+# Skip the default branch update prompt (on by default)
+./scripts/release.sh --no-update-default-branch
+
 # Use a custom config file
 ./scripts/release.sh --config /path/to/my.conf
-
-# Also update the GitLab default branch to the release branch
-./scripts/release.sh --update-default-branch
 
 # Create a merge request from a release branch back to main
 ./scripts/release.sh --hotfix-mr release/v1.2.3
@@ -67,7 +67,7 @@ When you run `release.sh`, it performs the following steps in order:
 9. **Detects the GitLab project ID** by parsing the git remote URL (supports SSH and HTTPS, including nested groups and self-hosted instances).
 10. **Creates a release branch** named `release/<tag>` (e.g. `release/v1.3.0`) and pushes it to the remote.
 11. **Creates an annotated tag** with the changelog as the tag message and pushes it to the remote.
-12. **Optionally updates the GitLab default branch** to the release branch. When `UPDATE_DEFAULT_BRANCH` is enabled (the default), the script prompts for confirmation before making the change. The prompt is skipped in `--non-interactive` mode.
+12. **Updates the GitLab default branch** to the release branch (enabled by default). The script prompts for confirmation before making the change. Use `--no-update-default-branch` to skip this step entirely, or disable it via `UPDATE_DEFAULT_BRANCH=false` in config. The confirmation prompt is auto-accepted in `--non-interactive` mode.
 13. **Switches back** to the default branch and prints a summary.
 
 If any step fails after branches or tags have been pushed, a **cleanup trap** automatically deletes the partial remote branch and tag, then restores you to the default branch.
@@ -118,12 +118,12 @@ The `--deploy-only` flag deploys an existing tagged release without creating a n
 ```
 
 The deploy-only flow:
-- Validates that `DEPLOY_BASE_PATH` is configured
+- Validates that `DEPLOY_BASE_PATH` is configured (via config file, env var, or `--deploy-path`)
 - Fetches tags from the remote
 - Prompts for a version (or uses `--version`)
 - Validates the tag exists
 - Clones the tag into `DEPLOY_BASE_PATH/<tool>/<version>`
-- Creates a modulefile at `DEPLOY_BASE_PATH/mf/<tool>/<version>`
+- Creates a modulefile at `DEPLOY_BASE_PATH/mf/<tool>/<version>` — if a modulefile from a previous version exists, it is copied and version references are updated; otherwise a default template is generated
 - **Errors if the deploy directory or modulefile already exists** (never overwrites)
 
 ### Command-Line Options
@@ -133,9 +133,11 @@ The deploy-only flow:
 | `--dry-run` | Run all validation and checks without making any changes. API calls, branch creation, tagging, and MR creation are skipped. |
 | `--hotfix-mr BRANCH` | Create a merge request from the specified release branch back to the default branch. The branch must exist on the remote and have commits ahead of the default branch. |
 | `--deploy-only` | Deploy an existing tagged release without creating a new branch or tag. Requires `DEPLOY_BASE_PATH` to be configured. Cannot be combined with `--hotfix-mr`. |
-| `--update-default-branch` | After creating the release branch, update the GitLab project's default branch to point to it. |
+| `--update-default-branch` | Update the GitLab project's default branch to the release branch (this is the default behavior). |
+| `--no-update-default-branch` | Skip updating the GitLab project's default branch. |
 | `--config FILE` | Load configuration from the specified file (in addition to the default config locations). |
 | `--version X.Y.Z` | Set the release version directly, bypassing the interactive version prompt. |
+| `--deploy-path PATH` | Deploy base path (overrides `DEPLOY_BASE_PATH` from config/env). |
 | `--non-interactive`, `-n` | Auto-confirm all prompts (for CI/CD). |
 | `--help`, `-h` | Show the help message and exit. |
 
@@ -156,7 +158,7 @@ An example config file is provided at `scripts/.release.conf.example`.
 
 #### Config File Format
 
-Config files use a simple `KEY=VALUE` format. Comments (lines starting with `#`) and blank lines are ignored. Values can be optionally quoted with single or double quotes.
+Config files use a simple `KEY=VALUE` format. Comments (lines starting with `#`) and blank lines are ignored. Values can be optionally quoted with single or double quotes. Leading and trailing whitespace in values is trimmed.
 
 ```bash
 # GitLab API base URL (change for self-hosted instances)
@@ -171,6 +173,15 @@ TAG_PREFIX=v
 # Git remote name
 REMOTE=origin
 
+# Verify SSL certificates (set to false for self-signed certs)
+VERIFY_SSL=true
+
+# Update GitLab default branch to the release branch (true/false)
+UPDATE_DEFAULT_BRANCH=true
+
+# Base path for deploy (clone + modulefile). If unset, deploy is skipped.
+# DEPLOY_BASE_PATH=/opt/software
+
 # GitLab token (prefer env var or ~/.gitlab_token instead)
 # GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 ```
@@ -184,6 +195,9 @@ REMOTE=origin
 | `RELEASE_DEFAULT_BRANCH` | `DEFAULT_BRANCH` | `main` | Branch to release from |
 | `RELEASE_TAG_PREFIX` | `TAG_PREFIX` | `v` | Prefix for version tags |
 | `RELEASE_REMOTE` | `REMOTE` | `origin` | Git remote name |
+| `GITLAB_VERIFY_SSL` | `VERIFY_SSL` | `true` | Verify SSL certificates (`false` for self-signed certs) |
+| `RELEASE_UPDATE_DEFAULT_BRANCH` | `UPDATE_DEFAULT_BRANCH` | `true` | Update GitLab default branch to the release branch |
+| `DEPLOY_BASE_PATH` | `DEPLOY_BASE_PATH` | *(none)* | Base path for deploy (clone + modulefile). If unset, deploy is skipped. |
 
 Environment variables are snapshotted at script startup. This means that if a config file sets a value for a variable that was already set in the environment, the environment value is preserved.
 
@@ -253,6 +267,7 @@ Nested group paths are URL-encoded (slashes become `%2F`) for the GitLab API.
 ### Security
 
 - The GitLab token is **never passed as a command-line argument** (which would be visible in process listings). Instead, it is written to a temporary file and passed to `curl` via `--header @file`. The file is deleted immediately after the API call.
+- The script **warns about file permissions** if `~/.gitlab_token` or `.release.conf` files are readable by group or others. Keep token-bearing files restricted: `chmod 600 ~/.gitlab_token`.
 - The script uses `set -euo pipefail` for strict error handling — undefined variables and failed commands cause immediate exit.
 
 ### Error Handling and Cleanup
@@ -265,6 +280,8 @@ The script sets a `trap` on `EXIT` that runs a cleanup handler on failure. If an
 - The local release branch is deleted.
 
 The trap is disabled after a successful release to avoid cleaning up valid artifacts.
+
+GitLab API calls include **automatic retry** — a single retry with a 2-second delay on 5xx server errors, which handles transient GitLab issues common in CI environments.
 
 ### CI/CD Usage
 
@@ -304,6 +321,10 @@ export GITLAB_API_URL=https://gitlab.mycompany.com/api/v4
 export GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
 ./scripts/release.sh
 
+# Self-hosted with self-signed certificate
+export GITLAB_VERIFY_SSL=false
+./scripts/release.sh
+
 # Release from a non-main branch
 export RELEASE_DEFAULT_BRANCH=develop
 ./scripts/release.sh
@@ -333,15 +354,15 @@ export RELEASE_TAG_PREFIX=release-
 
 ### Architecture
 
-The script (~750 lines) is organized into sequential modules, each responsible for one phase of the release workflow:
+The script (~1200 lines) is organized into sequential modules, each responsible for one phase of the release workflow:
 
-1. **Logging & utilities** — color-coded output (`log_info`, `log_warn`, `log_error`, `log_success`), `confirm()` prompt, `validate_semver()`
-2. **Argument parsing** — `parse_args()` handles CLI flags (`--dry-run`, `--hotfix-mr`, `--update-default-branch`, `--config`, `--help`)
+1. **Logging & utilities** — color-coded output (`log_info`, `log_warn`, `log_error`, `log_success`), `confirm()` prompt, `validate_semver()`, `_warn_file_permissions()`
+2. **Argument parsing** — `parse_args()` handles all CLI flags (`--dry-run`, `--hotfix-mr`, `--deploy-only`, `--update-default-branch` / `--no-update-default-branch`, `--config`, `--version`, `--deploy-path`, `--non-interactive`, `--help`)
 3. **Configuration loading** — multi-level config resolution with strict priority: env vars (snapshotted at startup) > `--config` file > repo `.release.conf` > user `~/.release.conf` > `~/.gitlab_token`
 4. **Repository validation** — `check_branch()` verifies git state (correct branch, clean tree, synced with remote)
-5. **Version management** — `get_latest_version()`, `suggest_versions()`, `prompt_version()` with duplicate tag/branch detection
+5. **Version management** — `get_latest_version()`, `suggest_versions()`, `check_version_available()`, `prompt_version()` with duplicate tag/branch detection
 6. **Changelog generation** — markdown-formatted commit list since last tag
-7. **GitLab API module** — `gitlab_api()` passes tokens via temp file headers (never CLI args); `get_gitlab_project_id()` parses SSH/HTTPS remotes including nested groups; `create_merge_request()` and `update_default_branch()`
+7. **GitLab API module** — `gitlab_api()` passes tokens via temp file headers (never CLI args) with automatic retry on 5xx errors; `get_gitlab_project_id()` parses SSH/HTTPS remotes including nested groups; `create_merge_request()` and `update_default_branch()`
 8. **Hotfix MR flow** — `hotfix_mr_flow()` validates a release branch, generates a changelog from commits ahead of the default branch, and creates a merge request back to the default branch
 9. **Deploy-only flow** — `deploy_only_flow()` deploys an existing tagged release without creating branches or tags
 10. **Interactive menu** — `show_main_menu()` presents a choice of Release, Deploy only, or Hotfix MR when run interactively without a mode flag
@@ -369,6 +390,8 @@ bats tests/test_config.bats        # Configuration loading
 bats tests/test_git_operations.bats # Git operations
 bats tests/test_semver.bats        # Semantic versioning
 bats tests/test_gitlab_api.bats    # GitLab API integration
+bats tests/test_deploy.bats        # Deploy functionality
+bats tests/test_deploy_only.bats   # Deploy-only mode
 bats tests/test_integration.bats   # End-to-end workflows
 
 # Run a specific test by name
