@@ -1,30 +1,23 @@
-# Example GitLab CI jobs for running release.sh non-interactively.
+# Example GitLab CI jobs for release.sh, deploy.sh, and bundle.sh.
 #
 # Prerequisites:
 #   - Set GITLAB_TOKEN as a CI/CD variable (Settings > CI/CD > Variables)
 #     with api scope. Mark it as "Masked" and optionally "Protected".
+#   - Python 3.12+ must be available in the CI image.
 #
-# Trigger the release job manually from the GitLab UI by setting RELEASE_VERSION
-# (e.g. "1.2.3"). The job will create a release branch and tag.
-#
-# Trigger the hotfix-mr job by setting HOTFIX_BRANCH (e.g. "release/v1.2.3").
-# The job will create a merge request from the release branch back to the
-# default branch.
-#
-# Trigger the deploy job by setting DEPLOY_VERSION (e.g. "1.2.3").
-# The job will deploy an existing tagged release.
+# Trigger jobs manually from the GitLab UI by setting the appropriate variable.
+
+# ── Tool Repo Jobs ──────────────────────────────────────────────────────
 
 release:
   stage: deploy
-  image: alpine:latest
+  image: python:3.12-alpine
   variables:
     GIT_DEPTH: 0  # Full history needed for changelog generation
   before_script:
-    - apk add --no-cache bash git curl jq
-    # Ensure full history even if GIT_DEPTH was ignored
+    - apk add --no-cache git
     - git fetch --unshallow 2>/dev/null || true
     - git fetch --tags
-    # Configure git user for annotated tags
     - git config user.name "GitLab CI"
     - git config user.email "ci@${CI_SERVER_HOST}"
   script:
@@ -36,11 +29,11 @@ release:
 
 hotfix-mr:
   stage: deploy
-  image: alpine:latest
+  image: python:3.12-alpine
   variables:
     GIT_DEPTH: 0
   before_script:
-    - apk add --no-cache bash git curl jq
+    - apk add --no-cache git
     - git fetch --unshallow 2>/dev/null || true
     - git fetch --tags
   script:
@@ -52,15 +45,56 @@ hotfix-mr:
 
 deploy:
   stage: deploy
-  image: alpine:latest
+  image: python:3.12-alpine
   variables:
     GIT_DEPTH: 0
   before_script:
-    - apk add --no-cache bash git curl jq
+    - apk add --no-cache git
     - git fetch --unshallow 2>/dev/null || true
     - git fetch --tags
   script:
-    - ./scripts/release.sh --deploy-only --version "$DEPLOY_VERSION" --non-interactive
+    - ./scripts/deploy.sh --version "$DEPLOY_VERSION"
+        --deploy-path /opt/software --non-interactive
+  rules:
+    - if: '$DEPLOY_VERSION'
+      when: manual
+  allow_failure: false
+
+# ── Toolset Repo Jobs ───────────────────────────────────────────────────
+
+bundle-release:
+  stage: deploy
+  image: python:3.12-alpine
+  variables:
+    GIT_DEPTH: 0
+    GIT_SUBMODULE_STRATEGY: recursive
+  before_script:
+    - apk add --no-cache git
+    - git fetch --unshallow 2>/dev/null || true
+    - git fetch --tags
+    - git config user.name "GitLab CI"
+    - git config user.email "ci@${CI_SERVER_HOST}"
+  script:
+    - ./scripts/bundle.sh --version "$RELEASE_VERSION"
+        --deploy-path /opt/software --non-interactive
+  rules:
+    - if: '$RELEASE_VERSION'
+      when: manual
+  allow_failure: false
+
+bundle-deploy:
+  stage: deploy
+  image: python:3.12-alpine
+  variables:
+    GIT_DEPTH: 0
+    GIT_SUBMODULE_STRATEGY: recursive
+  before_script:
+    - apk add --no-cache git
+    - git fetch --unshallow 2>/dev/null || true
+    - git fetch --tags
+  script:
+    - ./scripts/bundle.sh --deploy-only --version "$DEPLOY_VERSION"
+        --deploy-path /opt/software --non-interactive
   rules:
     - if: '$DEPLOY_VERSION'
       when: manual

@@ -4,7 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-dev-utils is a collection of Bash utility scripts for DevOps workflows. The primary component is `scripts/release.sh`, a GitLab release automation tool that handles semantic versioning, release branch creation, tagging, changelog generation, and merge request management.
+dev-utils is a collection of Python utility scripts for DevOps workflows, with thin Bash wrappers for CLI compatibility. The system consists of three tools:
+
+- **`release.sh` → `src/release.py`** — GitLab release automation (branch + tag + changelog + hotfix MR)
+- **`deploy.sh` → `src/deploy.py`** — Deploy tagged releases (clone + bootstrap + modulefile)
+- **`bundle.sh` → `src/bundle.py`** — Toolset bundle management (submodule detection + bundle release + bundle deploy)
+
+All three share a common library in `src/lib/` (config, git, gitlab_api, log, semver, modulefile, prompt).
+
+**Technology:** Python 3.12.3, stdlib only (no external packages).
 
 ## Commands
 
@@ -12,54 +20,68 @@ dev-utils is a collection of Bash utility scripts for DevOps workflows. The prim
 
 ```bash
 # Run all tests
-bats tests/test_*.bats
+python3 -m unittest discover tests/ -p "test_*.py"
 
-# Run a single test file
-bats tests/test_semver.bats
+# Run a specific test file
+python3 -m unittest tests/test_semver.py
 
 # Run a specific test by name
-bats tests/test_semver.bats -f "validates correct semver"
+python3 -m unittest tests.test_semver.TestValidateSemver.test_valid_versions
+
+# Run with verbose output
+python3 -m unittest discover tests/ -p "test_*.py" -v
 ```
 
-Test suites: `test_parse_args`, `test_config`, `test_git_operations`, `test_semver`, `test_gitlab_api`, `test_integration`.
+Test files: `test_config`, `test_semver`, `test_git`, `test_gitlab_api`, `test_modulefile`, `test_release`, `test_deploy`, `test_bundle`.
 
-### Running the Script
+### Running the Scripts
 
 ```bash
-./scripts/release.sh --dry-run       # validate without side effects
-./scripts/release.sh --config FILE   # use custom config file
-./scripts/release.sh --hotfix-mr release/v1.2.3  # create MR from release branch
+./scripts/release.sh --dry-run                    # validate without side effects
+./scripts/release.sh --version 1.2.3 -n           # non-interactive release
+./scripts/release.sh --hotfix-mr release/v1.2.3    # create MR from release branch
+./scripts/deploy.sh --version 1.2.3 --deploy-path /opt/software
+./scripts/bundle.sh --version 1.0.0 --deploy-path /opt/software -n
 ```
 
 ## Architecture
 
-### release.sh Structure
+### Code Structure
 
-The script (~750 lines) is organized into sequential modules, each responsible for one phase of the release workflow:
+```
+src/
+├── lib/                       # Shared library (Python package)
+│   ├── __init__.py
+│   ├── config.py              # Multi-level config loading (.release.conf format)
+│   ├── git.py                 # Git operations via subprocess
+│   ├── gitlab_api.py          # GitLab API via urllib.request (token via header)
+│   ├── log.py                 # Color-coded logging (log_info, log_warn, log_error, log_success)
+│   ├── semver.py              # Semver validation, version suggestion, comparison
+│   ├── modulefile.py          # Modulefile generation + template substitution
+│   └── prompt.py              # Interactive prompts (confirm, menu, version picker)
+├── release.py                 # Release tool: branch + tag + changelog + GitLab API
+├── deploy.py                  # Deploy tool: clone + bootstrap + modulefile
+└── bundle.py                  # Bundle tool: submodule detection + bundle release + deploy
 
-1. **Logging & utilities** — color-coded output (`log_info`, `log_warn`, `log_error`, `log_success`), `confirm()` prompt, `validate_semver()`
-2. **Argument parsing** — `parse_args()` handles CLI flags (`--dry-run`, `--hotfix-mr`, `--update-default-branch`, `--config`, `--help`)
-3. **Configuration loading** — multi-level config resolution with strict priority: env vars (snapshotted at startup) > `--config` file > repo `.release.conf` > user `~/.release.conf` > `~/.gitlab_token`
-4. **Repository validation** — `check_branch()` verifies git state (correct branch, clean tree, synced with remote)
-5. **Version management** — `get_latest_version()`, `suggest_versions()`, `prompt_version()` with duplicate tag/branch detection
-6. **Changelog generation** — markdown-formatted commit list since last tag
-7. **GitLab API module** — `gitlab_api()` passes tokens via temp file headers (never CLI args); `get_gitlab_project_id()` parses SSH/HTTPS remotes including nested groups; `create_merge_request()` and `update_default_branch()`
-8. **Hotfix MR flow** — `hotfix_mr_flow()` validates a release branch, generates a changelog from commits ahead of the default branch, and creates a merge request back to the default branch
-9. **Git operations** — branch/tag creation with push
-10. **Error recovery** — `cleanup_on_failure()` trap handler removes partial remote branches/tags on failure
-11. **Main flow** — `main()` orchestrates the full workflow; dispatches to `hotfix_mr_flow()` when `--hotfix-mr` is used
+scripts/
+├── release.sh                 # Thin wrapper: exec python3 src/release.py "$@"
+├── deploy.sh                  # Thin wrapper: exec python3 src/deploy.py "$@"
+└── bundle.sh                  # Thin wrapper: exec python3 src/bundle.py "$@"
+```
 
-Key design patterns:
-- Every write operation respects `$DRY_RUN` — full validation runs without side effects
-- Environment variables are snapshotted into `_ENV_*` vars at startup so config files cannot override them
-- The `cleanup_on_failure` trap ensures partial releases are rolled back
-- Release flow creates branch + tag only (no MR); MR creation is a separate step via `--hotfix-mr`
+### Key Design Patterns
+
+- Every write operation respects `dry_run` — full validation runs without side effects
+- Environment variables are snapshotted at import time so config files cannot override them
+- Cleanup on failure removes partial remote branches/tags
+- Release flow creates branch + tag only (no MR); MR creation is separate via `--hotfix-mr`
+- Bootstrap support: `install.sh` (priority) or `install.py` in tool repos
+- Modulefile template chain: repo `modulefile.tcl` > config template > default
+- Bundle modulefiles support per-tool version placeholders (`%tool-name%`, `%TOOL_LOADS%`)
 
 ### Test Infrastructure
 
-Tests use **BATS** (Bash Automated Testing System). Shared helpers in `tests/test_helpers.bash` provide:
+Tests use Python `unittest`. Shared helpers in `tests/conftest.py` provide:
 - `setup_test_repo()` — creates a bare remote + working clone per test
-- `source_release_functions()` — sources the script without executing `main()`
-- `start_mock_gitlab()` / `stop_mock_gitlab()` — manages `tests/mock_gitlab.py`, a Python HTTP server simulating GitLab API endpoints with scenario-based failure injection
-
-The mock server supports request recording for assertions and dynamic port assignment via a state file.
+- `setup_bundle_test_repo()` — creates parent + 2 sub-tool repos with submodules
+- `MockGitLabServer` — wraps `tests/mock_gitlab.py`, a Python HTTP server simulating GitLab API endpoints

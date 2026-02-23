@@ -1,4 +1,4 @@
-# .release.conf — Configuration for release.sh
+# .release.conf — Configuration for release.sh, deploy.sh, and bundle.sh
 #
 # Place this file in your repository root as .release.conf or in your
 # home directory as ~/.release.conf. Values can also be set via
@@ -50,3 +50,19 @@ UPDATE_DEFAULT_BRANCH=true
 # a modulefile to DEPLOY_BASE_PATH/mf/<tool>/<version>.
 # Env var: DEPLOY_BASE_PATH
 # DEPLOY_BASE_PATH=/opt/software
+
+# Path to a custom modulefile template file. Supports placeholders:
+# %VERSION%, %ROOT%, %TOOL_NAME%, %DEPLOY_BASE_PATH%
+# For bundles: %tool-name% (per-tool version), %TOOL_LOADS% (auto module loads)
+# Env var: MODULEFILE_TEMPLATE
+# MODULEFILE_TEMPLATE=/opt/templates/my-tool.tcl
+
+# ── Bundle-specific settings (toolset repos with submodules) ──────────
+
+# Subdirectory containing tool submodules. If unset, scans repo root.
+# Env var: BUNDLE_SUBMODULE_DIR
+# BUNDLE_SUBMODULE_DIR=tools
+
+# Override the bundle name (defaults to repo name from git remote).
+# Env var: BUNDLE_NAME
+# BUNDLE_NAME=my-toolset
