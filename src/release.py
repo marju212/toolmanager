@@ -415,12 +415,14 @@ def main(argv: list = None) -> None:
         # Clean up on failure if we created partial artifacts (not on success)
         if e.code != 0 and (cleanup_branch or cleanup_tag):
             cleanup_remote(cleanup_branch, cleanup_tag, config.remote,
-                           config.default_branch)
+                           config.default_branch,
+                           non_interactive=non_interactive)
         raise
     except Exception:
         if cleanup_branch or cleanup_tag:
             cleanup_remote(cleanup_branch, cleanup_tag, config.remote,
-                           config.default_branch)
+                           config.default_branch,
+                           non_interactive=non_interactive)
         raise
 
 

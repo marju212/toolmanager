@@ -6,6 +6,7 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from .log import log_info, log_warn, log_error, log_success
+from .prompt import confirm
 from .semver import validate_semver
 
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -213,8 +214,19 @@ def tag_release(tag_name: str, version: str, changelog: str, remote: str,
 
 
 def cleanup_remote(branch: str, tag: str, remote: str, default_branch: str,
-                   cwd: Optional[str] = None) -> None:
+                   cwd: Optional[str] = None,
+                   non_interactive: bool = False) -> None:
     """Remove partial remote artifacts on failure."""
+    items = []
+    if tag:
+        items.append(f"tag '{tag}'")
+    if branch:
+        items.append(f"branch '{branch}'")
+    if not confirm(f"Delete remote {' and '.join(items)}?",
+                   non_interactive=non_interactive):
+        log_warn("Skipping cleanup of partial artifacts.")
+        return
+
     log_warn("Release failed \u2014 cleaning up partial artifacts...")
 
     if tag:

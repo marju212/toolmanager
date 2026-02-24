@@ -369,12 +369,14 @@ def bundle_flow(args: dict, config) -> None:
     except SystemExit as e:
         if e.code != 0 and (cleanup_branch or cleanup_tag):
             cleanup_remote(cleanup_branch, cleanup_tag, config.remote,
-                           config.default_branch)
+                           config.default_branch,
+                           non_interactive=non_interactive)
         raise
     except Exception:
         if cleanup_branch or cleanup_tag:
             cleanup_remote(cleanup_branch, cleanup_tag, config.remote,
-                           config.default_branch)
+                           config.default_branch,
+                           non_interactive=non_interactive)
         raise
 
 

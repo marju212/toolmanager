@@ -197,9 +197,12 @@ def deploy_release(
     # Bootstrap step
     if not dry_run and os.path.isdir(deploy_dir):
         if not run_bootstrap(deploy_dir, dry_run):
-            log_warn(f"Removing clone directory due to failed bootstrap: "
-                     f"{deploy_dir}")
-            shutil.rmtree(deploy_dir, ignore_errors=True)
+            if confirm(f"Remove clone directory due to failed bootstrap: "
+                       f"{deploy_dir}?",
+                       dry_run=dry_run, non_interactive=non_interactive):
+                shutil.rmtree(deploy_dir, ignore_errors=True)
+            else:
+                log_warn(f"Clone directory left in place: {deploy_dir}")
             raise SystemExit(1)
     elif dry_run:
         run_bootstrap(deploy_dir, dry_run=True)
@@ -208,9 +211,12 @@ def deploy_release(
     if os.path.isfile(mf_file):
         log_error(f"Modulefile already exists: {mf_file}")
         if not dry_run and os.path.isdir(deploy_dir):
-            log_warn(f"Removing clone directory due to failed deploy: "
-                     f"{deploy_dir}")
-            shutil.rmtree(deploy_dir, ignore_errors=True)
+            if confirm(f"Remove clone directory due to failed deploy: "
+                       f"{deploy_dir}?",
+                       dry_run=dry_run, non_interactive=non_interactive):
+                shutil.rmtree(deploy_dir, ignore_errors=True)
+            else:
+                log_warn(f"Clone directory left in place: {deploy_dir}")
         raise SystemExit(1)
 
     # Check for existing modulefile from previous version
