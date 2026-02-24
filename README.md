@@ -72,8 +72,18 @@ The menu is skipped when `--version` is given or stdin is not a TTY.
 
 ### Hotfix Workflow
 
+Both scenarios start with creating a release and end with merging the fix back to main.
+
+**Fix directly on the release branch** — the bug is found in production and you write the fix on the release branch:
+
 1. Create a release: `./scripts/release.sh --version 1.2.0 --non-interactive`
-2. Push hotfix commits: `git checkout release/v1.2.0 && git cherry-pick <sha> && git push`
+2. Fix and push: `git checkout release/v1.2.0 && git add -A && git commit -m "Fix the bug" && git push`
+3. Create MR: `./scripts/release.sh --hotfix-mr release/v1.2.0`
+
+**Cherry-pick from another branch** — the fix already exists as a commit on `main` (or another branch):
+
+1. Create a release: `./scripts/release.sh --version 1.2.0 --non-interactive`
+2. Cherry-pick and push: `git checkout release/v1.2.0 && git cherry-pick <sha> && git push`
 3. Create MR: `./scripts/release.sh --hotfix-mr release/v1.2.0`
 
 ### Options
