@@ -3,6 +3,7 @@
 Provides:
   - setup_test_repo(): creates bare remote + working clone
   - setup_bundle_test_repo(): creates parent + 2 sub-tool repos with submodules
+  - install_git_mock() / uninstall_git_mock(): Python-level git interception
   - MockGitLabServer: wraps tests/mock_gitlab.py for use in tests
 """
 
@@ -41,7 +42,6 @@ def setup_test_repo(tmpdir=None):
         tmpdir: root temp directory
         remote_repo: path to bare remote
         work_repo: path to working clone
-        git_wrapper_dir: path to directory with git wrapper script
     """
     if tmpdir is None:
         tmpdir = tempfile.mkdtemp(prefix="devutils_test_")
@@ -67,48 +67,77 @@ def setup_test_repo(tmpdir=None):
     _run_git("commit", "-m", "Initial commit", cwd=work_repo)
     _run_git("push", "origin", "main", cwd=work_repo)
 
-    # Install git wrapper that intercepts remote get-url
-    git_wrapper_dir = _install_git_wrapper(tmpdir, remote_repo)
-
     return {
         "tmpdir": tmpdir,
         "remote_repo": remote_repo,
         "work_repo": work_repo,
-        "git_wrapper_dir": git_wrapper_dir,
     }
 
 
-def _install_git_wrapper(tmpdir, remote_repo):
-    """Create a git wrapper that fakes the remote URL."""
-    wrapper_dir = os.path.join(tmpdir, "bin")
-    os.makedirs(wrapper_dir, exist_ok=True)
+def install_git_mock(remote_repo_path, fake_url=FAKE_GITLAB_URL):
+    """Install Python-level git mock that intercepts remote get-url and clone.
 
-    real_git = shutil.which("git")
+    Monkeypatches lib.git._run_git (and all imported references) so that:
+      - 'git remote get-url ...' returns the fake GitLab URL
+      - 'git clone ... <fake_url> ...' rewrites to use the real local repo path
+      - All other git commands pass through to the real _run_git
 
-    wrapper_script = os.path.join(wrapper_dir, "git")
-    with open(wrapper_script, "w") as f:
-        f.write(f"""#!/usr/bin/env bash
-# Git wrapper for tests: intercepts 'remote get-url' to return fake GitLab URL
-# and rewrites clone commands to use the real bare repo.
-if [[ "${{1:-}}" == "remote" && "${{2:-}}" == "get-url" ]]; then
-  echo "{FAKE_GITLAB_URL}"
-  exit 0
-fi
-if [[ "${{1:-}}" == "clone" ]]; then
-  args=()
-  for arg in "$@"; do
-    if [[ "$arg" == "{FAKE_GITLAB_URL}" ]]; then
-      args+=("{remote_repo}")
-    else
-      args+=("$arg")
-    fi
-  done
-  exec "{real_git}" "${{args[@]}}"
-fi
-exec "{real_git}" "$@"
-""")
-    os.chmod(wrapper_script, 0o755)
-    return wrapper_dir
+    Returns a dict to pass to uninstall_git_mock() for cleanup.
+    """
+    import lib.git as git_module
+
+    original_run_git = git_module._run_git
+
+    def mock_run_git(*args, cwd=None, check=True, capture=True):
+        # Intercept: git remote get-url <remote>
+        if len(args) >= 2 and args[0] == "remote" and args[1] == "get-url":
+            return subprocess.CompletedProcess(
+                args=["git"] + list(args),
+                returncode=0,
+                stdout=fake_url + "\n",
+                stderr="",
+            )
+
+        # Intercept: git clone ... <fake_url> ... -> rewrite to local path
+        if len(args) >= 1 and args[0] == "clone":
+            new_args = tuple(
+                remote_repo_path if a == fake_url else a for a in args
+            )
+            return original_run_git(*new_args, cwd=cwd, check=check,
+                                    capture=capture)
+
+        # All other git commands: pass through
+        return original_run_git(*args, cwd=cwd, check=check, capture=capture)
+
+    # Track all patched references for restoration
+    patched = []
+
+    # Patch the source module (covers internal calls like get_remote_url)
+    git_module._run_git = mock_run_git
+    git_module.run_git = mock_run_git
+    patched.append(git_module)
+
+    # Patch imported references in consumer modules
+    # (from lib.git import run_git creates a local ref that won't see our patch)
+    for mod_name in ("deploy", "release", "bundle"):
+        mod = sys.modules.get(mod_name)
+        if mod and hasattr(mod, "run_git"):
+            mod.run_git = mock_run_git
+            patched.append(mod)
+
+    return {
+        "original_run_git": original_run_git,
+        "patched": patched,
+    }
+
+
+def uninstall_git_mock(mock_info):
+    """Restore original _run_git after install_git_mock()."""
+    original = mock_info["original_run_git"]
+    for mod in mock_info["patched"]:
+        if hasattr(mod, "_run_git"):
+            mod._run_git = original
+        mod.run_git = original
 
 
 def add_test_commit(work_repo, msg="Test commit"):
@@ -138,7 +167,7 @@ def setup_bundle_test_repo(tmpdir=None):
     """Create a bundle test repo with 2 tool submodules.
 
     Returns dict with keys:
-        tmpdir, remote_repo, work_repo, git_wrapper_dir,
+        tmpdir, remote_repo, work_repo,
         tool_a_remote, tool_b_remote, tool_a_work, tool_b_work
     """
     if tmpdir is None:
@@ -195,14 +224,10 @@ def setup_bundle_test_repo(tmpdir=None):
     _run_git("commit", "-m", "Add tool submodules", cwd=parent_work)
     _run_git("push", "origin", "main", cwd=parent_work)
 
-    # Install git wrapper for parent
-    git_wrapper_dir = _install_git_wrapper(tmpdir, parent_remote)
-
     return {
         "tmpdir": tmpdir,
         "remote_repo": parent_remote,
         "work_repo": parent_work,
-        "git_wrapper_dir": git_wrapper_dir,
         "tool_a_remote": tool_a_remote,
         "tool_b_remote": tool_b_remote,
         "tool_a_work": tool_a_work,

@@ -32,13 +32,10 @@ class GitTestCase(unittest.TestCase):
     def setUp(self):
         self.repo = setup_test_repo()
         self.original_dir = os.getcwd()
-        self.original_path = os.environ.get("PATH", "")
         os.chdir(self.repo["work_repo"])
-        os.environ["PATH"] = self.repo["git_wrapper_dir"] + ":" + self.original_path
 
     def tearDown(self):
         os.chdir(self.original_dir)
-        os.environ["PATH"] = self.original_path
         shutil.rmtree(self.repo["tmpdir"], ignore_errors=True)
 
 

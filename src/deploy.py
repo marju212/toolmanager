@@ -184,11 +184,8 @@ def deploy_release(
         log_info(f"Cloning {release_tag} into {deploy_dir}...")
         os.makedirs(os.path.dirname(deploy_dir), exist_ok=True)
         try:
-            subprocess.run(
-                ["git", "clone", "--branch", release_tag, "--depth", "1",
-                 remote_url, deploy_dir],
-                check=True, capture_output=True, text=True,
-            )
+            run_git("clone", "--branch", release_tag, "--depth", "1",
+                    remote_url, deploy_dir)
         except subprocess.CalledProcessError as e:
             log_error(f"Failed to clone {release_tag}: {e.stderr}")
             raise SystemExit(1)

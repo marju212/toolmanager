@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from conftest import (
     setup_test_repo, add_test_commit, create_test_tag,
-    push_test_commits, MockGitLabServer,
+    push_test_commits, install_git_mock, uninstall_git_mock,
+    MockGitLabServer,
 )
 from lib.config import _ENV_SNAPSHOT
 import lib.gitlab_api as gitlab_api_mod
@@ -91,10 +92,8 @@ class TestReleaseIntegration(unittest.TestCase):
     def setUp(self):
         self.repo = setup_test_repo()
         self.original_dir = os.getcwd()
-        self.original_path = os.environ.get("PATH", "")
         os.chdir(self.repo["work_repo"])
-        os.environ["PATH"] = (self.repo["git_wrapper_dir"] + ":" +
-                              self.original_path)
+        self.git_mock = install_git_mock(self.repo["remote_repo"])
 
         self.mock = MockGitLabServer()
         self.mock.start()
@@ -108,8 +107,8 @@ class TestReleaseIntegration(unittest.TestCase):
         gitlab_api_mod.RETRY_DELAY = 0.01
 
     def tearDown(self):
+        uninstall_git_mock(self.git_mock)
         os.chdir(self.original_dir)
-        os.environ["PATH"] = self.original_path
         shutil.rmtree(self.repo["tmpdir"], ignore_errors=True)
         self.mock.stop()
         _ENV_SNAPSHOT.update(self._orig_snapshot)
