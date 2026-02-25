@@ -1,4 +1,4 @@
-# dev-utils
+# toolmanager
 
 A collection of Python utility scripts for DevOps workflows: release automation, deploy management, and toolset bundling for GitLab repositories.
 
