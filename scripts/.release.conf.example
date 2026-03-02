@@ -15,8 +15,15 @@
 #   1. GITLAB_TOKEN environment variable  (export GITLAB_TOKEN=glpat-...)
 #   2. GITLAB_TOKEN key in a .release.conf file
 #   3. ~/.gitlab_token plain-text file    (echo "glpat-..." > ~/.gitlab_token)
-# Prefer option 1 or 3 over committing a token to a config file.
-# GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
+#
+# IMPORTANT: Do NOT put tokens in this file or any committed file.
+# Set the token via an exported env var or ~/.gitlab_token:
+#   export GITLAB_TOKEN=glpat-...
+# or:
+#   echo "glpat-..." > ~/.gitlab_token && chmod 600 ~/.gitlab_token
+#
+# Any file containing secrets should be mode 600:
+#   chmod 600 ~/.release.conf
 
 # GitLab API base URL. Change this for self-hosted GitLab instances.
 # Env var: GITLAB_API_URL

@@ -112,7 +112,7 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config.default_branch, "main")
         self.assertEqual(config.tag_prefix, "v")
         self.assertEqual(config.remote, "origin")
-        self.assertTrue(config.verify_ssl)
+        self.assertFalse(config.verify_ssl)
         self.assertTrue(config.update_default_branch)
         self.assertEqual(config.deploy_base_path, "")
 

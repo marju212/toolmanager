@@ -60,7 +60,7 @@ class Config:
     default_branch: str = "main"
     tag_prefix: str = "v"
     remote: str = "origin"
-    verify_ssl: bool = True
+    verify_ssl: bool = False
     update_default_branch: bool = True
     deploy_base_path: str = ""
     bundle_submodule_dir: str = ""

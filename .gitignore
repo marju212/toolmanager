@@ -1,0 +1,6 @@
+# Python
+__pycache__/
+*.pyc
+
+# Config files containing secrets
+.release.conf
