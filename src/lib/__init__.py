@@ -3,7 +3,7 @@
 from .log import log_info, log_warn, log_error, log_success
 from .config import load_config, Config
 from .semver import validate_semver, suggest_versions, compare_versions
-from .prompt import confirm, prompt_version, show_menu
+from .prompt import confirm, prompt_version
 
 __all__ = [
     "log_info",
@@ -17,5 +17,4 @@ __all__ = [
     "compare_versions",
     "confirm",
     "prompt_version",
-    "show_menu",
 ]

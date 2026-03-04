@@ -1,11 +1,13 @@
 # Example GitLab CI jobs for release.sh, deploy.sh, and bundle.sh.
 #
 # Prerequisites:
-#   - Set GITLAB_TOKEN as a CI/CD variable (Settings > CI/CD > Variables)
-#     with api scope. Mark it as "Masked" and optionally "Protected".
 #   - Python 3.12+ must be available in the CI image.
+#   - For deploy/bundle: set GITLAB_TOKEN as a CI/CD variable
+#     (Settings > CI/CD > Variables) with api scope. Mark it "Masked".
 #
-# Trigger jobs manually from the GitLab UI by setting the appropriate variable.
+# Trigger jobs manually from the GitLab UI by setting the appropriate variable:
+#   RELEASE_VERSION   e.g. 1.2.3   (triggers release or bundle-release)
+#   DEPLOY_VERSION    e.g. 1.2.3   (triggers deploy or bundle-deploy)
 
 # ── Tool Repo Jobs ──────────────────────────────────────────────────────
 
@@ -27,22 +29,6 @@ release:
       when: manual
   allow_failure: false
 
-hotfix-mr:
-  stage: deploy
-  image: python:3.12-alpine
-  variables:
-    GIT_DEPTH: 0
-  before_script:
-    - apk add --no-cache git
-    - git fetch --unshallow 2>/dev/null || true
-    - git fetch --tags
-  script:
-    - ./scripts/release.sh --hotfix-mr "$HOTFIX_BRANCH" --non-interactive
-  rules:
-    - if: '$HOTFIX_BRANCH'
-      when: manual
-  allow_failure: false
-
 deploy:
   stage: deploy
   image: python:3.12-alpine
@@ -54,13 +40,13 @@ deploy:
     - git fetch --tags
   script:
     - ./scripts/deploy.sh --version "$DEPLOY_VERSION"
-        --deploy-path /opt/software --non-interactive
+        --deploy-path "$DEPLOY_BASE_PATH" --non-interactive
   rules:
     - if: '$DEPLOY_VERSION'
       when: manual
   allow_failure: false
 
-# ── Toolset Repo Jobs ───────────────────────────────────────────────────
+# ── Toolset / Bundle Repo Jobs ──────────────────────────────────────────
 
 bundle-release:
   stage: deploy
@@ -76,7 +62,7 @@ bundle-release:
     - git config user.email "ci@${CI_SERVER_HOST}"
   script:
     - ./scripts/bundle.sh --version "$RELEASE_VERSION"
-        --deploy-path /opt/software --non-interactive
+        --deploy-path "$DEPLOY_BASE_PATH" --non-interactive
   rules:
     - if: '$RELEASE_VERSION'
       when: manual
@@ -94,7 +80,7 @@ bundle-deploy:
     - git fetch --tags
   script:
     - ./scripts/bundle.sh --deploy-only --version "$DEPLOY_VERSION"
-        --deploy-path /opt/software --non-interactive
+        --deploy-path "$DEPLOY_BASE_PATH" --non-interactive
   rules:
     - if: '$DEPLOY_VERSION'
       when: manual

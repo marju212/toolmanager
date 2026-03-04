@@ -6,13 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 dev-utils is a collection of Python utility scripts for DevOps workflows, with thin Bash wrappers for CLI compatibility. The system consists of three tools:
 
-- **`release.sh` → `src/release.py`** — GitLab release automation (branch + tag + changelog + hotfix MR)
+- **`release.sh` → `src/release.py`** — Release automation (tag from main + changelog; no branches, no GitLab API)
 - **`deploy.sh` → `src/deploy.py`** — Deploy tagged releases (clone + bootstrap + modulefile)
 - **`bundle.sh` → `src/bundle.py`** — Toolset bundle management (submodule detection + bundle release + bundle deploy)
 
 All three share a common library in `src/lib/` (config, git, gitlab_api, log, semver, modulefile, prompt).
 
-**Technology:** Python 3.12.3, stdlib only (no external packages).
+## Technology
+
+- **Python 3.12.3** — minimum and target version
+- **stdlib only** — no external packages; all functionality uses the Python standard library
 
 ## Commands
 
@@ -37,9 +40,9 @@ Test files: `test_config`, `test_semver`, `test_git`, `test_gitlab_api`, `test_m
 ### Running the Scripts
 
 ```bash
-./scripts/release.sh --dry-run                    # validate without side effects
-./scripts/release.sh --version 1.2.3 -n           # non-interactive release
-./scripts/release.sh --hotfix-mr release/v1.2.3    # create MR from release branch
+./scripts/release.sh --dry-run                              # validate without side effects
+./scripts/release.sh --version 1.2.3 -n                     # non-interactive release
+./scripts/release.sh --version 1.2.3 --description "text"   # release with description
 ./scripts/deploy.sh --version 1.2.3 --deploy-path /opt/software
 ./scripts/bundle.sh --version 1.0.0 --deploy-path /opt/software -n
 ```
@@ -58,8 +61,8 @@ src/
 │   ├── log.py                 # Color-coded logging (log_info, log_warn, log_error, log_success)
 │   ├── semver.py              # Semver validation, version suggestion, comparison
 │   ├── modulefile.py          # Modulefile generation + template substitution
-│   └── prompt.py              # Interactive prompts (confirm, menu, version picker)
-├── release.py                 # Release tool: branch + tag + changelog + GitLab API
+│   └── prompt.py              # Interactive prompts (confirm, version picker)
+├── release.py                 # Release tool: annotated tag from main + changelog
 ├── deploy.py                  # Deploy tool: clone + bootstrap + modulefile
 └── bundle.py                  # Bundle tool: submodule detection + bundle release + deploy
 
@@ -73,8 +76,7 @@ scripts/
 
 - Every write operation respects `dry_run` — full validation runs without side effects
 - Environment variables are snapshotted at import time so config files cannot override them
-- Cleanup on failure removes partial remote branches/tags
-- Release flow creates branch + tag only (no MR); MR creation is separate via `--hotfix-mr`
+- Release flow tags from main only — no release branches, no hotfix MRs, no GitLab API calls
 - Bootstrap support: `install.sh` (priority) or `install.py` in tool repos
 - Modulefile template chain: repo `modulefile.tcl` > config template > default
 - Bundle modulefiles support per-tool version placeholders (`%tool-name%`, `%TOOL_LOADS%`)

@@ -274,6 +274,30 @@ class TestDeployRelease(unittest.TestCase):
                                      "bootstrapped.txt")
         self.assertTrue(os.path.isfile(bootstrapped))
 
+    def test_custom_mf_path(self):
+        """Modulefile should go to mf_base_path/tool_name/version when set."""
+        add_test_commit(self.repo["work_repo"], "feat: one")
+        push_test_commits(self.repo["work_repo"])
+        create_test_tag(self.repo["work_repo"], "v1.0.0")
+
+        mf_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, mf_dir, True)
+
+        config = self._make_config(mf_base_path=mf_dir)
+        deploy_release("1.0.0", config)
+
+        # Modulefile should be under the custom mf path, not deploy_dir/mf/
+        mf_file = os.path.join(mf_dir, "test-project", "1.0.0")
+        self.assertTrue(os.path.isfile(mf_file))
+
+        # Should NOT appear under the default location
+        default_mf = os.path.join(self.deploy_dir, "mf", "test-project", "1.0.0")
+        self.assertFalse(os.path.isfile(default_mf))
+
+    def test_mf_path_arg(self):
+        args = parse_args(["--mf-path", "/opt/mf"])
+        self.assertEqual(args["cli_mf_path"], "/opt/mf")
+
 
 if __name__ == "__main__":
     unittest.main()

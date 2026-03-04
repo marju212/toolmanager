@@ -39,6 +39,10 @@ class TestBundleParseArgs(unittest.TestCase):
         args = parse_args(["--deploy-path", "/opt/tools"])
         self.assertEqual(args["cli_deploy_path"], "/opt/tools")
 
+    def test_mf_path(self):
+        args = parse_args(["--mf-path", "/opt/mf"])
+        self.assertEqual(args["cli_mf_path"], "/opt/mf")
+
     def test_combined(self):
         args = parse_args(["--dry-run", "--version", "1.0.0",
                            "--submodule-dir", "tools", "-n"])
@@ -163,6 +167,26 @@ class TestDeployBundle(unittest.TestCase):
             self.assertEqual(content, "tool-a: 1.2.0\ntool-b: 2.0.0")
         finally:
             shutil.rmtree(tmpdir)
+
+    def test_custom_mf_base_path(self):
+        """Modulefile should go to mf_base_path/bundle_name/version when set."""
+        deploy_dir = tempfile.mkdtemp()
+        mf_dir = tempfile.mkdtemp()
+        try:
+            deploy_bundle(
+                "1.0.0", "my-toolset", deploy_dir,
+                {"tool-a": "1.2.0", "tool-b": "2.0.0"},
+                mf_base_path=mf_dir,
+            )
+            mf_file = os.path.join(mf_dir, "my-toolset", "1.0.0")
+            self.assertTrue(os.path.isfile(mf_file))
+
+            # Should NOT appear under the default location
+            default_mf = os.path.join(deploy_dir, "mf", "my-toolset", "1.0.0")
+            self.assertFalse(os.path.isfile(default_mf))
+        finally:
+            shutil.rmtree(deploy_dir)
+            shutil.rmtree(mf_dir)
 
 
 class TestBundleModulefile(unittest.TestCase):

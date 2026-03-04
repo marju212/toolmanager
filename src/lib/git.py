@@ -6,8 +6,6 @@ import subprocess
 from typing import List, Optional, Tuple
 
 from .log import log_info, log_warn, log_error, log_success
-from .prompt import confirm
-from .semver import validate_semver
 
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
@@ -116,6 +114,7 @@ def get_latest_version(tag_prefix: str, cwd: Optional[str] = None) -> str:
         result = _run_git("tag", "--list", f"{tag_prefix}*",
                           "--sort=-v:refname", cwd=cwd)
     except subprocess.CalledProcessError:
+        log_info("No version tags found — treating as first release.")
         return "0.0.0"
 
     for line in result.stdout.strip().splitlines():
@@ -126,12 +125,13 @@ def get_latest_version(tag_prefix: str, cwd: Optional[str] = None) -> str:
         if _SEMVER_RE.match(version):
             return version
 
+    log_info("No version tags found — treating as first release.")
     return "0.0.0"
 
 
 def check_version_available(version: str, tag_prefix: str, remote: str,
                             cwd: Optional[str] = None) -> None:
-    """Check that a tag and release branch don't already exist.
+    """Check that the tag doesn't already exist.
 
     Raises SystemExit if the version is taken.
     """
@@ -140,13 +140,6 @@ def check_version_available(version: str, tag_prefix: str, remote: str,
     if result.returncode == 0:
         log_error(f"Tag '{tag_name}' already exists.")
         raise SystemExit(1)
-
-    branch_name = f"release/{tag_name}"
-    for ref in (branch_name, f"{remote}/{branch_name}"):
-        result = _run_git("rev-parse", "--verify", ref, cwd=cwd, check=False)
-        if result.returncode == 0:
-            log_error(f"Branch '{branch_name}' already exists.")
-            raise SystemExit(1)
 
 
 def generate_changelog(from_version: str, tag_prefix: str,
@@ -173,33 +166,9 @@ def generate_changelog(from_version: str, tag_prefix: str,
     return changelog
 
 
-def generate_changelog_range(from_ref: str, to_ref: str,
-                             cwd: Optional[str] = None) -> str:
-    """Generate changelog between two refs."""
-    result = _run_git("log", f"{from_ref}..{to_ref}",
-                      "--pretty=format:- %s (%h)", "--no-merges", cwd=cwd)
-    changelog = result.stdout.strip()
-    if not changelog:
-        changelog = "- No changes recorded"
-    return changelog
-
-
-def create_release_branch(branch_name: str, remote: str, dry_run: bool = False,
-                          cwd: Optional[str] = None) -> None:
-    """Create and push a release branch."""
-    log_info(f"Creating branch '{branch_name}'...")
-
-    if dry_run:
-        log_info(f"[dry-run] Would create and push branch '{branch_name}'")
-        return
-
-    _run_git("checkout", "-b", branch_name, cwd=cwd)
-    _run_git("push", "-u", remote, branch_name, cwd=cwd)
-    log_success(f"Branch '{branch_name}' created and pushed.")
-
-
 def tag_release(tag_name: str, version: str, changelog: str, remote: str,
-                dry_run: bool = False, cwd: Optional[str] = None) -> None:
+                dry_run: bool = False, cwd: Optional[str] = None,
+                description: str = "") -> None:
     """Create and push an annotated tag."""
     log_info(f"Creating annotated tag '{tag_name}'...")
 
@@ -207,48 +176,13 @@ def tag_release(tag_name: str, version: str, changelog: str, remote: str,
         log_info(f"[dry-run] Would create and push tag '{tag_name}'")
         return
 
-    message = f"Release {version}\n\n{changelog}"
+    if description:
+        message = f"Release {version}\n\n{description}\n\nChangelog:\n{changelog}"
+    else:
+        message = f"Release {version}\n\nChangelog:\n{changelog}"
     _run_git("tag", "-a", tag_name, "-m", message, cwd=cwd)
     _run_git("push", remote, tag_name, cwd=cwd)
     log_success(f"Tag '{tag_name}' created and pushed.")
-
-
-def cleanup_remote(branch: str, tag: str, remote: str, default_branch: str,
-                   cwd: Optional[str] = None,
-                   non_interactive: bool = False) -> None:
-    """Remove partial remote artifacts on failure."""
-    items = []
-    if tag:
-        items.append(f"tag '{tag}'")
-    if branch:
-        items.append(f"branch '{branch}'")
-    if not confirm(f"Delete remote {' and '.join(items)}?",
-                   non_interactive=non_interactive):
-        log_warn("Skipping cleanup of partial artifacts.")
-        return
-
-    log_warn("Release failed \u2014 cleaning up partial artifacts...")
-
-    if tag:
-        log_warn(f"Deleting remote tag '{tag}'...")
-        result = _run_git("push", remote, "--delete", tag, cwd=cwd, check=False)
-        if result.returncode != 0:
-            log_warn(f"Could not delete remote tag '{tag}': {result.stderr.strip()}")
-        _run_git("tag", "-d", tag, cwd=cwd, check=False)
-
-    if branch:
-        log_warn(f"Deleting remote branch '{branch}'...")
-        result = _run_git("push", remote, "--delete", branch, cwd=cwd, check=False)
-        if result.returncode != 0:
-            log_warn(f"Could not delete remote branch '{branch}': {result.stderr.strip()}")
-        # Try to restore to default branch
-        result = _run_git("checkout", default_branch, cwd=cwd, check=False)
-        if result.returncode != 0:
-            _run_git("checkout", f"{remote}/{default_branch}", cwd=cwd,
-                     check=False)
-        _run_git("branch", "-D", branch, cwd=cwd, check=False)
-
-    log_error("Release aborted. All partial changes have been cleaned up.")
 
 
 def get_remote_url(remote: str, cwd: Optional[str] = None) -> str:
@@ -298,7 +232,7 @@ def extract_tool_name(remote: str, cwd: Optional[str] = None) -> Tuple[str, str]
 def submodule_status(cwd: Optional[str] = None) -> List[dict]:
     """List submodules with their commit, path, and tag info.
 
-    Returns list of dicts with keys: name, path, commit, tag, version.
+    Returns list of dicts with keys: name, path, commit, tag.
     """
     result = _run_git("submodule", "status", cwd=cwd, check=False)
     if result.returncode != 0 or not result.stdout.strip():
@@ -334,11 +268,3 @@ def submodule_status(cwd: Optional[str] = None) -> List[dict]:
     return submodules
 
 
-def count_commits_ahead(from_ref: str, to_ref: str,
-                        cwd: Optional[str] = None) -> int:
-    """Count commits in to_ref that are not in from_ref."""
-    result = _run_git("rev-list", "--count", f"{from_ref}..{to_ref}",
-                      cwd=cwd, check=False)
-    if result.returncode != 0:
-        return 0
-    return int(result.stdout.strip())

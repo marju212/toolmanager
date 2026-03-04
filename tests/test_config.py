@@ -62,7 +62,6 @@ DEFAULT_BRANCH=develop
 TAG_PREFIX=release-
 REMOTE=upstream
 VERIFY_SSL=false
-UPDATE_DEFAULT_BRANCH=false
 DEPLOY_BASE_PATH=/opt/tools
 """
         path = self._write_conf(content)
@@ -73,7 +72,6 @@ DEPLOY_BASE_PATH=/opt/tools
         self.assertEqual(result["TAG_PREFIX"], "release-")
         self.assertEqual(result["REMOTE"], "upstream")
         self.assertEqual(result["VERIFY_SSL"], "false")
-        self.assertEqual(result["UPDATE_DEFAULT_BRANCH"], "false")
         self.assertEqual(result["DEPLOY_BASE_PATH"], "/opt/tools")
 
     def test_nonexistent_file(self):
@@ -84,6 +82,12 @@ DEPLOY_BASE_PATH=/opt/tools
         path = self._write_conf("GITLAB_API_URL=https://host.com/api/v4?foo=bar\n")
         result = _parse_conf_file(path)
         self.assertEqual(result["GITLAB_API_URL"], "https://host.com/api/v4?foo=bar")
+
+    def test_removed_update_default_branch_is_unknown(self):
+        """UPDATE_DEFAULT_BRANCH was removed; it must not be silently applied."""
+        path = self._write_conf("UPDATE_DEFAULT_BRANCH=false\n")
+        result = _parse_conf_file(path)
+        self.assertNotIn("UPDATE_DEFAULT_BRANCH", result)
 
 
 class TestLoadConfig(unittest.TestCase):
@@ -113,8 +117,8 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config.tag_prefix, "v")
         self.assertEqual(config.remote, "origin")
         self.assertFalse(config.verify_ssl)
-        self.assertTrue(config.update_default_branch)
         self.assertEqual(config.deploy_base_path, "")
+        self.assertEqual(config.mf_base_path, "")
 
     def test_config_file_overrides_defaults(self):
         path = self._write_conf("DEFAULT_BRANCH=develop\nTAG_PREFIX=release-\n")
@@ -142,11 +146,6 @@ class TestLoadConfig(unittest.TestCase):
         config = load_config(config_file=path)
         self.assertFalse(config.verify_ssl)
 
-    def test_update_default_branch_false(self):
-        path = self._write_conf("UPDATE_DEFAULT_BRANCH=false\n")
-        config = load_config(config_file=path)
-        self.assertFalse(config.update_default_branch)
-
     def test_repo_config(self):
         tmpdir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmpdir, True)
@@ -166,6 +165,21 @@ class TestLoadConfig(unittest.TestCase):
         self.assertEqual(config.bundle_submodule_dir, "tools")
         self.assertEqual(config.bundle_name, "my-toolset")
         self.assertEqual(config.modulefile_template, "/path/to/template")
+
+    def test_mf_base_path_conf_key(self):
+        path = self._write_conf("MF_BASE_PATH=/opt/modulefiles\n")
+        config = load_config(config_file=path)
+        self.assertEqual(config.mf_base_path, "/opt/modulefiles")
+
+    def test_mf_base_path_env_var(self):
+        _ENV_SNAPSHOT["MF_BASE_PATH"] = "/env/modulefiles"
+        config = load_config()
+        self.assertEqual(config.mf_base_path, "/env/modulefiles")
+
+    def test_cli_mf_path_overrides_all(self):
+        _ENV_SNAPSHOT["MF_BASE_PATH"] = "/env/modulefiles"
+        config = load_config(cli_mf_path="/cli/modulefiles")
+        self.assertEqual(config.mf_base_path, "/cli/modulefiles")
 
 
 if __name__ == "__main__":

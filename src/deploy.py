@@ -6,6 +6,7 @@ Usage: deploy.py [OPTIONS]
 Options:
   --version X.Y.Z            Version to deploy (required)
   --deploy-path PATH         Deploy base path (required, or from config)
+  --mf-path PATH             Override base directory for modulefiles
   --config FILE              Path to config file
   --dry-run                  Show what would be done
   --non-interactive, -n      Auto-confirm all prompts
@@ -43,6 +44,7 @@ Deploy a tagged release: clone, run bootstrap, write modulefile.
 Options:
   --version X.Y.Z            Version to deploy (required, or interactive)
   --deploy-path PATH         Deploy base path (required, or from config)
+  --mf-path PATH             Override base directory for modulefiles
   --config FILE              Path to config file
   --dry-run                  Show what would be done
   --non-interactive, -n      Auto-confirm all prompts
@@ -56,6 +58,7 @@ def parse_args(argv: list) -> dict:
         "config_file": "",
         "cli_version": "",
         "cli_deploy_path": "",
+        "cli_mf_path": "",
         "non_interactive": False,
     }
 
@@ -81,6 +84,12 @@ def parse_args(argv: list) -> dict:
                 log_error("--deploy-path requires a directory path argument")
                 raise SystemExit(1)
             args["cli_deploy_path"] = argv[i + 1]
+            i += 1
+        elif arg == "--mf-path":
+            if i + 1 >= len(argv):
+                log_error("--mf-path requires a directory path argument")
+                raise SystemExit(1)
+            args["cli_mf_path"] = argv[i + 1]
             i += 1
         elif arg in ("--non-interactive", "-n"):
             args["non_interactive"] = True
@@ -170,7 +179,8 @@ def deploy_release(
     tool_name, remote_url = extract_tool_name(remote)
 
     deploy_dir = os.path.join(deploy_base_path, tool_name, version)
-    mf_dir = os.path.join(deploy_base_path, "mf", tool_name)
+    mf_base = config.mf_base_path or os.path.join(deploy_base_path, "mf")
+    mf_dir = os.path.join(mf_base, tool_name)
     mf_file = os.path.join(mf_dir, version)
 
     # Clone step
@@ -182,12 +192,17 @@ def deploy_release(
         log_info(f"[dry-run] Would clone {release_tag} into {deploy_dir}")
     else:
         log_info(f"Cloning {release_tag} into {deploy_dir}...")
-        os.makedirs(os.path.dirname(deploy_dir), exist_ok=True)
+        try:
+            os.makedirs(os.path.dirname(deploy_dir), exist_ok=True)
+        except OSError as e:
+            log_error(f"Cannot create deploy directory: {e}")
+            raise SystemExit(1)
         try:
             run_git("clone", "--branch", release_tag, "--depth", "1",
                     remote_url, deploy_dir)
         except subprocess.CalledProcessError as e:
-            log_error(f"Failed to clone {release_tag}: {e.stderr}")
+            detail = e.stderr.strip() if e.stderr and e.stderr.strip() else str(e)
+            log_error(f"Failed to clone {release_tag}: {detail}")
             raise SystemExit(1)
         log_success(f"Cloned {release_tag} into {deploy_dir}")
 
@@ -252,6 +267,7 @@ def main(argv: list = None) -> None:
         config_file=args["config_file"],
         repo_root=repo_root,
         cli_deploy_path=args["cli_deploy_path"],
+        cli_mf_path=args["cli_mf_path"],
     )
 
     dry_run = args["dry_run"]
@@ -290,7 +306,7 @@ def main(argv: list = None) -> None:
             print(f"Latest tag: {config.tag_prefix}{latest}", file=sys.stderr)
             print("", file=sys.stderr)
             try:
-                version = input("Enter version to deploy (X.Y.Z): ").strip()
+                version = input("Enter version to deploy (X.Y.Z, Ctrl+C to cancel): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("", file=sys.stderr)
                 raise SystemExit(1)

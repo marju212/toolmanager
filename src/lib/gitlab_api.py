@@ -25,7 +25,7 @@ def gitlab_request(
     token: str,
     api_url: str = "https://gitlab.com/api/v4",
     data: Optional[dict] = None,
-    verify_ssl: bool = True,
+    verify_ssl: bool = False,
 ) -> dict:
     """Make a GitLab API request.
 
@@ -107,7 +107,6 @@ def gitlab_request(
             log_error("Check GITLAB_API_URL, network connectivity, and SSL settings.")
             raise RuntimeError(f"Connection failed: {e.reason}")
 
-    # Should not reach here
     raise RuntimeError("GitLab API request failed after retries")
 
 
@@ -161,66 +160,3 @@ def get_project_id(
     return str(project_id)
 
 
-def create_merge_request(
-    project_id: str,
-    source_branch: str,
-    target_branch: str,
-    title: str,
-    description: str,
-    token: str,
-    api_url: str = "https://gitlab.com/api/v4",
-    verify_ssl: bool = True,
-    dry_run: bool = False,
-) -> str:
-    """Create a merge request on GitLab.
-
-    Returns the MR web URL.
-    """
-    log_info(f"Creating merge request: {source_branch} \u2192 {target_branch}")
-
-    if dry_run:
-        log_info(f"[dry-run] Would create MR: {source_branch} \u2192 {target_branch}")
-        return "https://gitlab.com (dry-run)"
-
-    data = {
-        "source_branch": source_branch,
-        "target_branch": target_branch,
-        "title": title,
-        "description": description,
-        "remove_source_branch": False,
-    }
-
-    response = gitlab_request("POST",
-                              f"/projects/{project_id}/merge_requests",
-                              token=token, data=data, api_url=api_url,
-                              verify_ssl=verify_ssl)
-
-    mr_url = response.get("web_url", "")
-    if not mr_url:
-        log_warn("Merge request created but could not retrieve URL.")
-        return "(unknown)"
-
-    log_success(f"Merge request created: {mr_url}")
-    return mr_url
-
-
-def update_default_branch(
-    project_id: str,
-    branch: str,
-    token: str,
-    api_url: str = "https://gitlab.com/api/v4",
-    verify_ssl: bool = True,
-    dry_run: bool = False,
-) -> None:
-    """Update the default branch of a GitLab project."""
-    log_info(f"Updating GitLab default branch to '{branch}'...")
-
-    if dry_run:
-        log_info(f"[dry-run] Would update default branch to '{branch}'")
-        return
-
-    gitlab_request("PUT", f"/projects/{project_id}",
-                   token=token, data={"default_branch": branch},
-                   api_url=api_url, verify_ssl=verify_ssl)
-
-    log_success(f"Default branch updated to '{branch}'.")

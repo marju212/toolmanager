@@ -2,7 +2,7 @@
 
 import sys
 
-from .log import log_info, log_warn, log_error, log_success
+from .log import log_info, log_error
 from .semver import validate_semver, suggest_versions
 
 
@@ -17,7 +17,7 @@ def confirm(message: str = "Continue?", dry_run: bool = False,
         log_info(f"[dry-run] Would prompt: {message} [y/N]")
         return True
     if non_interactive:
-        log_info(f"[non-interactive] {message} [y/N]")
+        log_info(f"[non-interactive] Auto-confirming: {message}")
         return True
 
     try:
@@ -61,62 +61,30 @@ def prompt_version(
     print("  4) Custom", file=sys.stderr)
     print("", file=sys.stderr)
 
-    try:
-        choice = input("Select version bump [1-4]: ")
-    except (EOFError, KeyboardInterrupt):
-        print("", file=sys.stderr)
-        raise SystemExit(1)
-
-    choice = choice.strip()
-    if choice == "1":
-        return suggestions["patch"]
-    elif choice == "2":
-        return suggestions["minor"]
-    elif choice == "3":
-        return suggestions["major"]
-    elif choice == "4":
-        try:
-            version = input("Enter version (X.Y.Z): ")
-        except (EOFError, KeyboardInterrupt):
-            print("", file=sys.stderr)
-            raise SystemExit(1)
-        validate_semver(version.strip())
-        return version.strip()
-    else:
-        log_error(f"Invalid choice: {choice}")
-        raise SystemExit(1)
-
-
-def show_menu(options: list, prompt_text: str = "Select an option") -> int:
-    """Display a numbered menu and return the selected index (0-based).
-
-    Args:
-        options: List of (label, description) tuples.
-        prompt_text: Prompt text to show.
-
-    Returns:
-        Selected option index (0-based).
-    """
     while True:
-        print("", file=sys.stderr)
-        print("What would you like to do?", file=sys.stderr)
-        print("", file=sys.stderr)
-        for i, (label, desc) in enumerate(options, 1):
-            print(f"  {i}) {label:<16}{desc}", file=sys.stderr)
-        print("", file=sys.stderr)
-
         try:
-            choice = input(f"{prompt_text} [1-{len(options)}]: ")
+            choice = input("Select version bump [1-4]: ")
         except (EOFError, KeyboardInterrupt):
             print("", file=sys.stderr)
             raise SystemExit(1)
 
-        try:
-            idx = int(choice.strip())
-            if 1 <= idx <= len(options):
-                return idx - 1
-        except ValueError:
-            pass
-
-        log_warn(f"Invalid choice: '{choice.strip()}'. "
-                 f"Please enter 1-{len(options)}.")
+        choice = choice.strip()
+        if choice == "1":
+            return suggestions["patch"]
+        elif choice == "2":
+            return suggestions["minor"]
+        elif choice == "3":
+            return suggestions["major"]
+        elif choice == "4":
+            try:
+                version = input("Enter version (X.Y.Z): ")
+            except (EOFError, KeyboardInterrupt):
+                print("", file=sys.stderr)
+                raise SystemExit(1)
+            try:
+                validate_semver(version.strip())
+                return version.strip()
+            except ValueError as e:
+                log_error(str(e))
+        else:
+            log_error(f"Invalid choice: '{choice}'. Enter 1, 2, 3, or 4.")

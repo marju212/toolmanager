@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Mock GitLab API server for testing release.sh.
+Mock GitLab API server for testing.
 
 Simulates the following endpoints:
   GET  /api/v4/projects/:id              - Get project by ID or encoded path
-  PUT  /api/v4/projects/:id              - Update project (default branch)
-  POST /api/v4/projects/:id/merge_requests - Create merge request
+  PUT  /api/v4/projects/:id              - Update project
 
 Usage:
   python3 mock_gitlab.py [--port PORT] [--state-dir DIR]
@@ -42,7 +41,6 @@ class MockState:
             "default_branch": "main",
             "web_url": "https://gitlab.example.com/group/test-project",
         }
-        self.merge_request_counter = 0
         self.lock = threading.Lock()
 
     def record_request(self, method, path, headers, body):
@@ -134,9 +132,6 @@ class GitLabHandler(BaseHTTPRequestHandler):
         # Route: PUT /projects/:id_or_path
         elif method == "PUT" and path.startswith("/projects/"):
             self._handle_update_project(path, body)
-        # Route: POST /projects/:id_or_path/merge_requests
-        elif method == "POST" and "/merge_requests" in path:
-            self._handle_create_mr(path, body)
         else:
             self._send_json(404, {"message": f"404 Not Found: {method} {self.path}"})
 
@@ -174,29 +169,6 @@ class GitLabHandler(BaseHTTPRequestHandler):
             self.state.project["default_branch"] = data["default_branch"]
 
         self._send_json(200, self.state.project)
-
-    def _handle_create_mr(self, path, body):
-        try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            self._send_json(400, {"message": "400 Bad Request: invalid JSON"})
-            return
-
-        self.state.merge_request_counter += 1
-        mr_id = self.state.merge_request_counter
-
-        mr = {
-            "id": mr_id,
-            "iid": mr_id,
-            "title": data.get("title", f"MR !{mr_id}"),
-            "description": data.get("description", ""),
-            "source_branch": data.get("source_branch", ""),
-            "target_branch": data.get("target_branch", "main"),
-            "state": "opened",
-            "web_url": f"{self.state.project['web_url']}/-/merge_requests/{mr_id}",
-            "remove_source_branch": data.get("remove_source_branch", False),
-        }
-        self._send_json(201, mr)
 
     def do_GET(self):
         self._route("GET")

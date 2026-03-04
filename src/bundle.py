@@ -8,6 +8,7 @@ Options:
   --submodule-dir DIR        Subdirectory containing tool submodules
   --version X.Y.Z            Set bundle version non-interactively
   --deploy-path PATH         Deploy base path
+  --mf-path PATH             Override base directory for modulefiles
   --config FILE              Path to config file
   --dry-run                  Show what would be done
   --non-interactive, -n      Auto-confirm all prompts
@@ -16,6 +17,7 @@ Options:
 
 import os
 import sys
+from typing import Optional
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
@@ -26,10 +28,8 @@ from lib.config import load_config
 from lib.semver import validate_semver
 from lib.git import (
     get_repo_root, check_branch, get_latest_version, check_version_available,
-    generate_changelog, create_release_branch, tag_release, cleanup_remote,
-    get_remote_url, extract_tool_name, run_git,
+    generate_changelog, tag_release, get_remote_url, extract_tool_name, run_git,
 )
-from lib.gitlab_api import get_project_id, update_default_branch
 from lib.modulefile import (
     generate_bundle_modulefile, resolve_template, write_modulefile,
 )
@@ -46,6 +46,7 @@ Options:
   --submodule-dir DIR        Subdirectory containing tool submodules
   --version X.Y.Z            Set bundle version non-interactively
   --deploy-path PATH         Deploy base path
+  --mf-path PATH             Override base directory for modulefiles
   --config FILE              Path to config file
   --dry-run                  Show what would be done
   --non-interactive, -n      Auto-confirm all prompts
@@ -61,6 +62,7 @@ def parse_args(argv: list) -> dict:
         "config_file": "",
         "cli_version": "",
         "cli_deploy_path": "",
+        "cli_mf_path": "",
         "non_interactive": False,
     }
 
@@ -95,6 +97,12 @@ def parse_args(argv: list) -> dict:
                 raise SystemExit(1)
             args["cli_deploy_path"] = argv[i + 1]
             i += 1
+        elif arg == "--mf-path":
+            if i + 1 >= len(argv):
+                log_error("--mf-path requires a directory path argument")
+                raise SystemExit(1)
+            args["cli_mf_path"] = argv[i + 1]
+            i += 1
         elif arg in ("--non-interactive", "-n"):
             args["non_interactive"] = True
         elif arg in ("--help", "-h"):
@@ -110,7 +118,7 @@ def parse_args(argv: list) -> dict:
 
 
 def detect_submodules(submodule_dir: str, tag_prefix: str,
-                      cwd: str = None) -> list:
+                      cwd: Optional[str] = None) -> list:
     """Detect submodules and their pinned versions.
 
     Args:
@@ -210,6 +218,7 @@ def deploy_bundle(
     template_path: str = "",
     template_content: str = None,
     dry_run: bool = False,
+    mf_base_path: str = "",
 ) -> None:
     """Deploy a bundle modulefile.
 
@@ -221,8 +230,11 @@ def deploy_bundle(
         template_path: Path to custom template.
         template_content: Pre-loaded template content.
         dry_run: If True, show what would be done.
+        mf_base_path: Override base directory for modulefiles. If unset,
+            modulefiles go to deploy_base_path/mf/bundle_name/version.
     """
-    mf_dir = os.path.join(deploy_base_path, "mf", bundle_name)
+    mf_base = mf_base_path or os.path.join(deploy_base_path, "mf")
+    mf_dir = os.path.join(mf_base, bundle_name)
     mf_file = os.path.join(mf_dir, version)
 
     if os.path.isfile(mf_file):
@@ -274,7 +286,6 @@ def bundle_flow(args: dict, config) -> None:
         check_version_available(new_version, config.tag_prefix, config.remote)
         log_success(f"Will release {config.tag_prefix}{new_version}")
 
-    release_branch = f"release/{config.tag_prefix}{new_version}"
     release_tag = f"{config.tag_prefix}{new_version}"
 
     # Generate changelog + append manifest
@@ -298,86 +309,33 @@ def bundle_flow(args: dict, config) -> None:
         log_warn("Bundle release cancelled.")
         return
 
-    # Detect GitLab project
-    remote_url = get_remote_url(config.remote)
-    if not remote_url:
-        log_error(f"Cannot determine URL for remote '{config.remote}'. "
-                  f"Check that the remote exists: git remote -v")
-        raise SystemExit(1)
-    project_id = get_project_id(
-        remote_url, config.gitlab_token, config.gitlab_api_url,
-        config.verify_ssl, dry_run,
-    )
+    # Create annotated tag on main and push
+    tag_release(release_tag, new_version, changelog, config.remote, dry_run)
 
-    cleanup_branch = ""
-    cleanup_tag = ""
+    # Deploy bundle modulefile if deploy path is set
+    if config.deploy_base_path:
+        if confirm(f"Deploy bundle modulefile to "
+                   f"{config.deploy_base_path}?",
+                   dry_run=dry_run, non_interactive=non_interactive):
+            # Resolve template
+            template_content = resolve_template(
+                config_template_path=config.modulefile_template,
+            )
+            bundle_name = config.bundle_name
+            if not bundle_name:
+                bundle_name, _ = extract_tool_name(config.remote)
 
-    try:
-        # Create release branch
-        create_release_branch(release_branch, config.remote, dry_run)
-        cleanup_branch = release_branch
+            deploy_bundle(
+                new_version, bundle_name, config.deploy_base_path,
+                tool_versions,
+                template_content=template_content,
+                dry_run=dry_run,
+                mf_base_path=config.mf_base_path,
+            )
+        else:
+            log_info("Skipping bundle modulefile deploy.")
 
-        # Create annotated tag
-        tag_release(release_tag, new_version, changelog, config.remote,
-                    dry_run)
-        cleanup_tag = release_tag
-
-        # Optionally update default branch
-        if config.update_default_branch:
-            if confirm(f"Update GitLab default branch to '{release_branch}'?",
-                       dry_run=dry_run, non_interactive=non_interactive):
-                update_default_branch(project_id, release_branch,
-                                      config.gitlab_token,
-                                      config.gitlab_api_url,
-                                      config.verify_ssl, dry_run)
-            else:
-                log_info("Skipping default branch update.")
-
-        # Switch back to default branch
-        if not dry_run:
-            result = run_git("checkout", config.default_branch, check=False)
-            if result.returncode != 0:
-                result = run_git("checkout",
-                                 f"{config.remote}/{config.default_branch}",
-                                 check=False)
-                if result.returncode != 0:
-                    log_warn(f"Could not switch back to '{config.default_branch}'. "
-                             f"You may need to run: git checkout {config.default_branch}")
-
-        # Deploy bundle modulefile if deploy path is set
-        if config.deploy_base_path:
-            if confirm(f"Deploy bundle modulefile to "
-                       f"{config.deploy_base_path}?",
-                       dry_run=dry_run, non_interactive=non_interactive):
-                # Resolve template
-                template_content = resolve_template(
-                    config_template_path=config.modulefile_template,
-                )
-                bundle_name = config.bundle_name
-                if not bundle_name:
-                    bundle_name, _ = extract_tool_name(config.remote)
-
-                deploy_bundle(
-                    new_version, bundle_name, config.deploy_base_path,
-                    tool_versions,
-                    template_content=template_content,
-                    dry_run=dry_run,
-                )
-
-        log_success(f"Bundle release {release_tag} completed!")
-
-    except SystemExit as e:
-        if e.code != 0 and (cleanup_branch or cleanup_tag):
-            cleanup_remote(cleanup_branch, cleanup_tag, config.remote,
-                           config.default_branch,
-                           non_interactive=non_interactive)
-        raise
-    except Exception:
-        if cleanup_branch or cleanup_tag:
-            cleanup_remote(cleanup_branch, cleanup_tag, config.remote,
-                           config.default_branch,
-                           non_interactive=non_interactive)
-        raise
+    log_success(f"Bundle release {release_tag} completed!")
 
 
 def bundle_deploy_only_flow(args: dict, config) -> None:
@@ -394,7 +352,9 @@ def bundle_deploy_only_flow(args: dict, config) -> None:
 
     # Fetch tags
     log_info(f"Fetching tags from {config.remote}...")
-    run_git("fetch", config.remote, "--tags", "--quiet", check=False)
+    result = run_git("fetch", config.remote, "--tags", "--quiet", check=False)
+    if result.returncode != 0:
+        log_warn(f"Could not fetch from '{config.remote}' — using local tags.")
 
     # Version selection
     if args["cli_version"]:
@@ -414,7 +374,7 @@ def bundle_deploy_only_flow(args: dict, config) -> None:
             print("", file=sys.stderr)
             print(f"Latest tag: {config.tag_prefix}{latest}", file=sys.stderr)
             try:
-                version = input("Enter bundle version to deploy (X.Y.Z): ").strip()
+                version = input("Enter bundle version to deploy (X.Y.Z, Ctrl+C to cancel): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("", file=sys.stderr)
                 raise SystemExit(1)
@@ -441,6 +401,7 @@ def bundle_deploy_only_flow(args: dict, config) -> None:
     try:
         # Checkout tag (detached)
         if not dry_run:
+            log_info(f"Checking out {release_tag}...")
             run_git("checkout", release_tag)
             run_git("submodule", "update", "--init")
 
@@ -469,6 +430,7 @@ def bundle_deploy_only_flow(args: dict, config) -> None:
             version, bundle_name, config.deploy_base_path, tool_versions,
             template_content=template_content,
             dry_run=dry_run,
+            mf_base_path=config.mf_base_path,
         )
 
         log_success(f"Bundle deploy of {release_tag} completed!")
@@ -476,7 +438,11 @@ def bundle_deploy_only_flow(args: dict, config) -> None:
     finally:
         # Restore original branch
         if not dry_run and original_ref:
-            run_git("checkout", original_ref, check=False)
+            restore = run_git("checkout", original_ref, check=False)
+            if restore.returncode != 0:
+                log_warn(f"Could not restore branch '{original_ref}'. "
+                         "You may be in a detached HEAD state — run: "
+                         f"git checkout {original_ref}")
 
 
 def main(argv: list = None) -> None:
@@ -489,6 +455,7 @@ def main(argv: list = None) -> None:
         config_file=args["config_file"],
         repo_root=repo_root,
         cli_deploy_path=args["cli_deploy_path"],
+        cli_mf_path=args["cli_mf_path"],
     )
 
     dry_run = args["dry_run"]

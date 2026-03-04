@@ -24,7 +24,11 @@ def suggest_versions(current: str) -> dict:
 
     Returns:
         Dict with keys 'patch', 'minor', 'major' containing suggested versions.
+
+    Raises:
+        ValueError: If current is not a valid X.Y.Z semver string.
     """
+    validate_semver(current)
     parts = current.split(".")
     major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
     return {
@@ -39,7 +43,12 @@ def compare_versions(a: str, b: str) -> int:
 
     Returns:
         -1 if a < b, 0 if a == b, 1 if a > b.
+
+    Raises:
+        ValueError: If either argument is not a valid X.Y.Z semver string.
     """
+    validate_semver(a)
+    validate_semver(b)
     pa = tuple(int(x) for x in a.split("."))
     pb = tuple(int(x) for x in b.split("."))
     if pa < pb:

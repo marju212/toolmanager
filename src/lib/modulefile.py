@@ -133,13 +133,21 @@ def resolve_template(
     if deploy_dir:
         repo_template = os.path.join(deploy_dir, "modulefile.tcl")
         if os.path.isfile(repo_template):
-            with open(repo_template, "r") as f:
-                return f.read()
+            try:
+                with open(repo_template, "r") as f:
+                    return f.read()
+            except OSError as e:
+                log_warn(f"Cannot read repo template '{repo_template}': {e} "
+                         "— falling through to next template source.")
 
     # Check config template path
     if config_template_path and os.path.isfile(config_template_path):
-        with open(config_template_path, "r") as f:
-            return f.read()
+        try:
+            with open(config_template_path, "r") as f:
+                return f.read()
+        except OSError as e:
+            log_warn(f"Cannot read config template '{config_template_path}': {e} "
+                     "— using default template.")
 
     return None
 
@@ -179,8 +187,12 @@ def generate_bundle_modulefile(
     """
     template = template_content
     if template is None and template_path and os.path.isfile(template_path):
-        with open(template_path, "r") as f:
-            template = f.read()
+        try:
+            with open(template_path, "r") as f:
+                template = f.read()
+        except OSError as e:
+            log_warn(f"Cannot read bundle template '{template_path}': {e} "
+                     "— using default bundle template.")
 
     if template is not None:
         # Custom template — substitute placeholders
@@ -218,9 +230,13 @@ def write_modulefile(content: str, mf_path: str, dry_run: bool = False) -> None:
         log_info(f"[dry-run] Would write modulefile to {mf_path}")
         return
 
-    os.makedirs(os.path.dirname(mf_path), exist_ok=True)
-    with open(mf_path, "w") as f:
-        f.write(content)
+    try:
+        os.makedirs(os.path.dirname(mf_path), exist_ok=True)
+        with open(mf_path, "w") as f:
+            f.write(content)
+    except OSError as e:
+        log_error(f"Cannot write modulefile to '{mf_path}': {e}")
+        raise SystemExit(1)
     log_success(f"Modulefile written to {mf_path}")
 
 
@@ -245,13 +261,27 @@ def copy_and_update_modulefile(
                  f"{dest_path} (updating version to {new_version})")
         return
 
-    with open(source_path, "r") as f:
-        content = f.read()
+    try:
+        with open(source_path, "r") as f:
+            content = f.read()
+    except OSError as e:
+        log_error(f"Cannot read modulefile '{source_path}': {e}")
+        raise SystemExit(1)
 
-    content = content.replace(old_version, new_version)
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    with open(dest_path, "w") as f:
-        f.write(content)
+    # Use word-boundary anchors so e.g. "1.1.0" inside "21.1.0" is not replaced.
+    content = re.sub(
+        r"(?<![.\d])" + re.escape(old_version) + r"(?![.\d])",
+        new_version,
+        content,
+    )
+
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "w") as f:
+            f.write(content)
+    except OSError as e:
+        log_error(f"Cannot write modulefile to '{dest_path}': {e}")
+        raise SystemExit(1)
     log_success(f"Modulefile copied and updated to {dest_path}")
 
 

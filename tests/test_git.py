@@ -16,13 +16,11 @@ from lib.git import (
     get_latest_version,
     check_branch,
     generate_changelog,
-    create_release_branch,
     tag_release,
     check_version_available,
     get_remote_url,
     parse_project_path,
     extract_tool_name,
-    count_commits_ahead,
 )
 
 
@@ -105,6 +103,69 @@ class TestCheckBranch(GitTestCase):
             check_branch("main", "origin", cwd=self.repo["work_repo"])
 
 
+class TestTagRelease(GitTestCase):
+    """Test tag_release()."""
+
+    def test_creates_tag(self):
+        add_test_commit(self.repo["work_repo"], "feat: add feature")
+        push_test_commits(self.repo["work_repo"])
+
+        tag_release("v1.0.0", "1.0.0", "- feat: add feature (abc1234)",
+                    "origin", cwd=self.repo["work_repo"])
+
+        import subprocess
+        result = subprocess.run(
+            ["git", "tag", "--list", "v1.0.0"],
+            cwd=self.repo["work_repo"], capture_output=True, text=True,
+        )
+        self.assertIn("v1.0.0", result.stdout)
+
+    def test_tag_message_contains_changelog(self):
+        add_test_commit(self.repo["work_repo"], "feat: widget")
+        push_test_commits(self.repo["work_repo"])
+
+        tag_release("v1.0.0", "1.0.0", "- feat: widget (abc1234)",
+                    "origin", cwd=self.repo["work_repo"])
+
+        import subprocess
+        result = subprocess.run(
+            ["git", "tag", "-l", "--format=%(contents)", "v1.0.0"],
+            cwd=self.repo["work_repo"], capture_output=True, text=True,
+        )
+        self.assertIn("Changelog:", result.stdout)
+        self.assertIn("feat: widget", result.stdout)
+
+    def test_tag_message_with_description(self):
+        add_test_commit(self.repo["work_repo"], "feat: widget")
+        push_test_commits(self.repo["work_repo"])
+
+        tag_release("v1.0.0", "1.0.0", "- feat: widget (abc1234)",
+                    "origin", cwd=self.repo["work_repo"],
+                    description="Adds widget support")
+
+        import subprocess
+        result = subprocess.run(
+            ["git", "tag", "-l", "--format=%(contents)", "v1.0.0"],
+            cwd=self.repo["work_repo"], capture_output=True, text=True,
+        )
+        self.assertIn("Adds widget support", result.stdout)
+        self.assertIn("Changelog:", result.stdout)
+
+    def test_dry_run_creates_no_tag(self):
+        add_test_commit(self.repo["work_repo"], "feat: widget")
+        push_test_commits(self.repo["work_repo"])
+
+        tag_release("v1.0.0", "1.0.0", "- feat: widget",
+                    "origin", dry_run=True, cwd=self.repo["work_repo"])
+
+        import subprocess
+        result = subprocess.run(
+            ["git", "tag", "--list", "v1.0.0"],
+            cwd=self.repo["work_repo"], capture_output=True, text=True,
+        )
+        self.assertEqual(result.stdout.strip(), "")
+
+
 class TestGenerateChangelog(GitTestCase):
     """Test generate_changelog()."""
 
@@ -135,31 +196,6 @@ class TestGenerateChangelog(GitTestCase):
         self.assertIn("No changes recorded", result)
 
 
-class TestCreateReleaseBranch(GitTestCase):
-    """Test create_release_branch()."""
-
-    def test_dry_run(self):
-        import subprocess
-        create_release_branch("release/v1.0.0", "origin", dry_run=True,
-                              cwd=self.repo["work_repo"])
-        # Branch should not exist
-        result = subprocess.run(
-            ["git", "branch", "--list", "release/v1.0.0"],
-            cwd=self.repo["work_repo"], capture_output=True, text=True,
-        )
-        self.assertEqual(result.stdout.strip(), "")
-
-    def test_creates_branch(self):
-        import subprocess
-        create_release_branch("release/v1.0.0", "origin",
-                              cwd=self.repo["work_repo"])
-        result = subprocess.run(
-            ["git", "branch", "--list", "release/v1.0.0"],
-            cwd=self.repo["work_repo"], capture_output=True, text=True,
-        )
-        self.assertIn("release/v1.0.0", result.stdout)
-
-
 class TestCheckVersionAvailable(GitTestCase):
     """Test check_version_available()."""
 
@@ -175,6 +211,21 @@ class TestCheckVersionAvailable(GitTestCase):
         with self.assertRaises(SystemExit):
             check_version_available("1.0.0", "v", "origin",
                                     cwd=self.repo["work_repo"])
+
+    def test_only_checks_tag_not_branch(self):
+        """Branch with release/ prefix should not block version availability."""
+        import subprocess
+        add_test_commit(self.repo["work_repo"], "feat")
+        push_test_commits(self.repo["work_repo"])
+        subprocess.run(["git", "checkout", "-b", "release/v1.0.0"],
+                       cwd=self.repo["work_repo"], capture_output=True)
+        subprocess.run(["git", "push", "origin", "release/v1.0.0"],
+                       cwd=self.repo["work_repo"], capture_output=True)
+        subprocess.run(["git", "checkout", "main"],
+                       cwd=self.repo["work_repo"], capture_output=True)
+        # Should not raise — only the tag matters now
+        check_version_available("1.0.0", "v", "origin",
+                                cwd=self.repo["work_repo"])
 
 
 class TestParseProjectPath(unittest.TestCase):
@@ -209,27 +260,6 @@ class TestParseProjectPath(unittest.TestCase):
     def test_invalid(self):
         result = parse_project_path("not-a-url")
         self.assertEqual(result, "")
-
-
-class TestCountCommitsAhead(GitTestCase):
-    """Test count_commits_ahead()."""
-
-    def test_commits_ahead(self):
-        import subprocess
-        add_test_commit(self.repo["work_repo"], "feat: one")
-        push_test_commits(self.repo["work_repo"])
-        # Create a branch with more commits
-        subprocess.run(["git", "checkout", "-b", "feature"],
-                       cwd=self.repo["work_repo"], capture_output=True)
-        add_test_commit(self.repo["work_repo"], "feat: two")
-        subprocess.run(["git", "push", "origin", "feature"],
-                       cwd=self.repo["work_repo"], capture_output=True)
-        subprocess.run(["git", "fetch", "origin"],
-                       cwd=self.repo["work_repo"], capture_output=True)
-
-        count = count_commits_ahead("origin/main", "origin/feature",
-                                    cwd=self.repo["work_repo"])
-        self.assertEqual(count, 1)
 
 
 if __name__ == "__main__":
