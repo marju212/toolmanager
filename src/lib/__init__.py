@@ -1,4 +1,4 @@
-"""Shared library for dev-utils release, deploy, and bundle tools."""
+"""Shared library for dev-utils release and deploy tools."""
 
 from .log import log_info, log_warn, log_error, log_success
 from .config import load_config, Config

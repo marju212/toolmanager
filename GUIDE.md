@@ -539,20 +539,149 @@ deploy.sh scan -n              # report only, or:
 deploy.sh upgrade my-tool -n
 ```
 
-### 6.4 Deploy a Toolset Modulefile
+### 6.4 Create a Toolset Modulefile
 
-After deploying all constituent tools:
+A toolset modulefile loads a named collection of tools with a single `module load` command. The version you pass to `toolset` is the version of the *toolset itself* — it does not need to match any individual tool version.
+
+#### Step 1 — Define the toolset in tools.json
+
+Add a `"toolsets"` entry listing the tool names that belong to the set:
+
+```json
+{
+  "tools": {
+    "tool-a": {
+      "version": "1.2.0",
+      "source": { "type": "git", "url": "git@gitlab.com:group/tool-a.git" }
+    },
+    "tool-b": {
+      "version": "2.0.0",
+      "source": { "type": "disk", "path": "/nfs/share/tool-b" }
+    }
+  },
+  "toolsets": {
+    "science": ["tool-a", "tool-b"]
+  }
+}
+```
+
+Each tool in the list must already have a non-empty `version` field — that version ends up in the `module load` lines. If a tool has not been deployed yet, its `version` will be empty and the `toolset` command will refuse to run.
+
+#### Step 2 — Deploy any tools that have no recorded version
 
 ```bash
-# Deploy individual tools first
-deploy.sh deploy my-tool --version 1.3.0 -n
-deploy.sh deploy another-tool --version 3.1.0 -n
+# Check which tools are missing a version
+deploy.sh scan -n
 
-# Write the toolset modulefile
-deploy.sh toolset science --version 2.0.0
+# Deploy missing tools
+deploy.sh deploy tool-a --version 1.2.0 -n
+deploy.sh deploy tool-b --version 2.0.0 -n
+```
 
-# Users load the full set
-module load science/2.0.0
+After each deploy, `tools.json` is updated with the deployed version automatically.
+
+#### Step 3 — Write the toolset modulefile
+
+```bash
+deploy.sh toolset science --version 1.0.0
+```
+
+The modulefile is written to `DEPLOY_BASE_PATH/mf/science/1.0.0` (or `MF_BASE_PATH/science/1.0.0` if set). Default output:
+
+```tcl
+#%Module1.0
+##
+## science/1.0.0 modulefile
+##
+
+proc ModulesHelp { } {
+    puts stderr "science version 1.0.0"
+}
+
+module-whatis "science version 1.0.0"
+
+conflict science
+
+module load tool-a/1.2.0
+module load tool-b/2.0.0
+```
+
+#### Step 4 — Users load the toolset
+
+```bash
+module load science/1.0.0
+```
+
+This loads `tool-a/1.2.0` and `tool-b/2.0.0` in one command.
+
+---
+
+#### Updating the toolset for new tool versions
+
+When you deploy newer versions of constituent tools, write a new toolset version to record the change:
+
+```bash
+# Deploy the updated tool
+deploy.sh deploy tool-a --version 1.3.0 -n
+
+# Write a new toolset modulefile referencing the new versions
+deploy.sh toolset science --version 1.1.0
+```
+
+Old toolset modulefiles (`science/1.0.0`) remain on disk — users pinned to the old set are unaffected.
+
+---
+
+#### Using a custom toolset template
+
+The default template only generates `module load` lines. For sites that need extra environment setup, create a Tcl template and reference it in config:
+
+```ini
+# .release.conf
+MODULEFILE_TEMPLATE=/opt/templates/science.tcl
+```
+
+```tcl
+#%Module1.0
+proc ModulesHelp { } {
+    puts stderr "science %VERSION% — tool-a %tool-a%, tool-b %tool-b%"
+}
+module-whatis "science %VERSION%"
+conflict science
+
+%TOOL_LOADS%
+
+setenv SCIENCE_HOME /opt/software/science/%VERSION%
+```
+
+Available placeholders in toolset templates:
+
+| Placeholder | Expands to |
+|---|---|
+| `%VERSION%` | The version passed to `--version` (e.g. `1.0.0`) |
+| `%TOOL_NAME%` | The toolset name (`science`) |
+| `%TOOL_LOADS%` | Full `module load` block for all tools in the set |
+| `%tool-a%` | Deployed version of `tool-a` (from `tools.json`) |
+| `%tool-b%` | Deployed version of `tool-b` (from `tools.json`) |
+
+Any `%name%` placeholder that does not match a tool in the toolset is treated as an error and the command exits before writing.
+
+---
+
+#### Common options
+
+```bash
+# Separate modulefile directory
+deploy.sh toolset science --version 1.0.0 --mf-path /opt/modulefiles
+
+# Preview without writing anything
+deploy.sh toolset science --version 1.0.0 --dry-run
+
+# Non-interactive (no confirmation prompt)
+deploy.sh toolset science --version 1.0.0 -n
+
+# Explicit manifest path
+deploy.sh toolset science --version 1.0.0 --manifest /etc/tools.json
 ```
 
 ### 6.5 Redeploy an Older Version

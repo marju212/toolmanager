@@ -12,7 +12,7 @@ from lib.modulefile import (
     validate_template_placeholders,
     resolve_template,
     generate_default_modulefile,
-    generate_bundle_modulefile,
+    generate_toolset_modulefile,
     write_modulefile,
     copy_and_update_modulefile,
     find_latest_modulefile,
@@ -137,11 +137,11 @@ class TestGenerateDefaultModulefile(unittest.TestCase):
         self.assertIn("prepend-path PATH", result)
 
 
-class TestGenerateBundleModulefile(unittest.TestCase):
-    """Test generate_bundle_modulefile()."""
+class TestGenerateToolsetModulefile(unittest.TestCase):
+    """Test generate_toolset_modulefile()."""
 
-    def test_default_bundle_template(self):
-        result = generate_bundle_modulefile(
+    def test_default_toolset_template(self):
+        result = generate_toolset_modulefile(
             "my-toolset", "1.0.0", "/opt/software",
             {"tool-a": "1.2.0", "tool-b": "2.0.0"},
         )
@@ -152,7 +152,7 @@ class TestGenerateBundleModulefile(unittest.TestCase):
 
     def test_custom_template(self):
         template = "bundle=%TOOL_NAME%/%VERSION%\n%TOOL_LOADS%"
-        result = generate_bundle_modulefile(
+        result = generate_toolset_modulefile(
             "my-toolset", "1.0.0", "/opt/software",
             {"tool-a": "1.2.0"},
             template_content=template,
@@ -161,7 +161,7 @@ class TestGenerateBundleModulefile(unittest.TestCase):
 
     def test_custom_template_with_per_tool(self):
         template = "tool-a version: %tool-a%"
-        result = generate_bundle_modulefile(
+        result = generate_toolset_modulefile(
             "my-toolset", "1.0.0", "/opt/software",
             {"tool-a": "1.2.0"},
             template_content=template,
@@ -171,7 +171,7 @@ class TestGenerateBundleModulefile(unittest.TestCase):
     def test_invalid_placeholder_in_template(self):
         template = "bad: %nonexistent%"
         with self.assertRaises(ValueError):
-            generate_bundle_modulefile(
+            generate_toolset_modulefile(
                 "my-toolset", "1.0.0", "/opt/software",
                 {"tool-a": "1.2.0"},
                 template_content=template,

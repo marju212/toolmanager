@@ -26,7 +26,7 @@ prepend-path PATH $root/bin
 """
 
 
-DEFAULT_BUNDLE_MODULEFILE_TEMPLATE = """\
+DEFAULT_TOOLSET_MODULEFILE_TEMPLATE = """\
 #%Module1.0
 ##
 ## {tool_name}/{version} modulefile
@@ -68,7 +68,7 @@ def substitute_placeholders(
         root: Deploy root path for this tool version.
         tool_name: Tool/bundle name.
         deploy_base_path: Base deploy path.
-        tool_versions: Dict mapping tool names to versions (for bundles).
+        tool_versions: Dict mapping tool names to versions (for toolsets).
 
     Returns:
         Template with placeholders substituted.
@@ -160,22 +160,22 @@ def generate_default_modulefile(tool_name: str, version: str, root: str) -> str:
     )
 
 
-def generate_bundle_modulefile(
-    bundle_name: str,
+def generate_toolset_modulefile(
+    toolset_name: str,
     version: str,
     deploy_base_path: str,
     tool_versions: dict[str, str],
     template_path: str = "",
     template_content: str | None = None,
 ) -> str:
-    """Generate a bundle modulefile.
+    """Generate a toolset modulefile.
 
     If a custom template is provided, uses placeholder substitution.
-    Otherwise uses the default bundle template.
+    Otherwise uses the default toolset template.
 
     Args:
-        bundle_name: Bundle/toolset name.
-        version: Bundle version.
+        toolset_name: Toolset name.
+        version: Toolset version.
         deploy_base_path: Deploy base path.
         tool_versions: Dict mapping tool names to versions.
         template_path: Path to custom template file.
@@ -190,8 +190,8 @@ def generate_bundle_modulefile(
             with open(template_path, "r") as f:
                 template = f.read()
         except OSError as e:
-            log_warn(f"Cannot read bundle template '{template_path}': {e} "
-                     "— using default bundle template.")
+            log_warn(f"Cannot read toolset template '{template_path}': {e} "
+                     "— using default toolset template.")
 
     if template is not None:
         # Custom template — substitute placeholders
@@ -199,19 +199,19 @@ def generate_bundle_modulefile(
         return substitute_placeholders(
             template,
             version=version,
-            tool_name=bundle_name,
+            tool_name=toolset_name,
             deploy_base_path=deploy_base_path,
             tool_versions=tool_versions,
         )
 
-    # Default bundle template
+    # Default toolset template
     load_lines = []
     for name, ver in sorted(tool_versions.items()):
         load_lines.append(f"module load {name}/{ver}")
     tool_loads = "\n".join(load_lines)
 
-    return DEFAULT_BUNDLE_MODULEFILE_TEMPLATE.format(
-        tool_name=bundle_name,
+    return DEFAULT_TOOLSET_MODULEFILE_TEMPLATE.format(
+        tool_name=toolset_name,
         version=version,
         tool_loads=tool_loads,
     )

@@ -21,7 +21,7 @@ from lib.sources import build_adapter, SourceError
 from lib.modulefile import (
     resolve_template, substitute_placeholders, generate_default_modulefile,
     write_modulefile, copy_and_update_modulefile, find_latest_modulefile,
-    generate_bundle_modulefile,
+    generate_toolset_modulefile,
 )
 from lib.prompt import confirm
 
@@ -627,8 +627,8 @@ def cmd_toolset(name: str, version: str, args: dict, config) -> None:
         )
         raise SystemExit(1)
 
-    content = generate_bundle_modulefile(
-        bundle_name=name,
+    content = generate_toolset_modulefile(
+        toolset_name=name,
         version=version,
         deploy_base_path=deploy_base_path,
         tool_versions=tool_versions,
