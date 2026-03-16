@@ -201,7 +201,7 @@ class TestCheckVersionAvailable(GitTestCase):
 
     def test_available(self):
         # Should not raise
-        check_version_available("1.0.0", "v", "origin",
+        check_version_available("1.0.0", "v",
                                 cwd=self.repo["work_repo"])
 
     def test_tag_exists(self):
@@ -209,7 +209,7 @@ class TestCheckVersionAvailable(GitTestCase):
         push_test_commits(self.repo["work_repo"])
         create_test_tag(self.repo["work_repo"], "v1.0.0")
         with self.assertRaises(SystemExit):
-            check_version_available("1.0.0", "v", "origin",
+            check_version_available("1.0.0", "v",
                                     cwd=self.repo["work_repo"])
 
     def test_only_checks_tag_not_branch(self):
@@ -224,7 +224,7 @@ class TestCheckVersionAvailable(GitTestCase):
         subprocess.run(["git", "checkout", "main"],
                        cwd=self.repo["work_repo"], capture_output=True)
         # Should not raise — only the tag matters now
-        check_version_available("1.0.0", "v", "origin",
+        check_version_available("1.0.0", "v",
                                 cwd=self.repo["work_repo"])
 
 

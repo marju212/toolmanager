@@ -45,24 +45,12 @@ Copy the example config to your repo root and edit it:
 cp toolmanager/scripts/.release.conf.example .release.conf
 ```
 
-At minimum, set:
+The defaults (`DEFAULT_BRANCH=main`, `TAG_PREFIX=v`, `REMOTE=origin`) work for most repos — only set them if your repo differs.
 
-```ini
-DEFAULT_BRANCH=main      # branch you release from
-TAG_PREFIX=v             # tags will look like v1.2.3
-REMOTE=origin            # git remote name
-```
-
-For deploy and bundle, also set:
+For deploy and bundle, set:
 
 ```ini
 DEPLOY_BASE_PATH=/opt/software   # where releases are cloned to
-```
-
-Keep the file at `600` permissions if it contains tokens:
-
-```bash
-chmod 600 .release.conf
 ```
 
 ---
@@ -364,12 +352,9 @@ All three scripts share the same config system. Config files use `KEY=VALUE` for
 
 | Variable | Config Key | Default | Description |
 |---|---|---|---|
-| `GITLAB_TOKEN` | `GITLAB_TOKEN` | *(none)* | GitLab personal access token (deploy/bundle only) |
-| `GITLAB_API_URL` | `GITLAB_API_URL` | `https://gitlab.com/api/v4` | GitLab API base URL |
 | `RELEASE_DEFAULT_BRANCH` | `DEFAULT_BRANCH` | `main` | Branch to release from |
 | `RELEASE_TAG_PREFIX` | `TAG_PREFIX` | `v` | Prefix for version tags (e.g. `v` → `v1.2.3`) |
 | `RELEASE_REMOTE` | `REMOTE` | `origin` | Git remote name |
-| `GITLAB_VERIFY_SSL` | `VERIFY_SSL` | `false` | Verify SSL certificates |
 | `DEPLOY_BASE_PATH` | `DEPLOY_BASE_PATH` | *(none)* | Base path for cloned releases and modulefiles |
 | `MF_BASE_PATH` | `MF_BASE_PATH` | *(none)* | Override modulefile directory (separate NFS mount, etc.) |
 | `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template |
@@ -378,25 +363,15 @@ All three scripts share the same config system. Config files use `KEY=VALUE` for
 
 Environment variables are snapshotted at startup — config files cannot override them.
 
-### Token Resolution
-
-Used by `deploy.sh` and `bundle.sh` for GitLab API calls (`release.sh` does not need a token):
-
-1. `GITLAB_TOKEN` environment variable (highest priority)
-2. `GITLAB_TOKEN` key in a `.release.conf` file
-3. `~/.gitlab_token` plain-text file
-
-> **Security:** Never commit tokens to a config file. Use an env var or `~/.gitlab_token` with `chmod 600`.
-
 ### Sample `.release.conf`
 
 ```ini
 # .release.conf — repo-level config
 
-DEFAULT_BRANCH=main
-TAG_PREFIX=v
-REMOTE=origin
-VERIFY_SSL=false
+# Uncomment to override defaults (main / v / origin)
+# DEFAULT_BRANCH=main
+# TAG_PREFIX=v
+# REMOTE=origin
 
 # Deploy settings
 DEPLOY_BASE_PATH=/opt/software
@@ -416,7 +391,6 @@ src/
 │   ├── __init__.py
 │   ├── config.py              # Multi-level config loading
 │   ├── git.py                 # Git operations via subprocess
-│   ├── gitlab_api.py          # GitLab API via urllib.request
 │   ├── log.py                 # Color-coded stderr logging
 │   ├── semver.py              # Semver validation + suggestions
 │   ├── modulefile.py          # Modulefile generation + templates
@@ -457,9 +431,8 @@ python3 -m unittest discover tests/ -p "test_*.py" -v
 | File | Coverage |
 |---|---|
 | `test_config.py` | Config loading, priority chain, env override |
-| `test_semver.py` | Validation, suggestions, comparison |
+| `test_semver.py` | Validation, suggestions |
 | `test_git.py` | Branch check, tag detection, changelog, URL parsing |
-| `test_gitlab_api.py` | HTTP requests, auth, retry, project ID |
 | `test_modulefile.py` | Template loading, placeholders, default template |
 | `test_release.py` | Release flow, description flag, argument parsing |
 | `test_deploy.py` | Clone, bootstrap, modulefile generation |
@@ -493,4 +466,3 @@ Detached HEAD is supported for CI runners that checkout specific commits.
 | `RELEASE_VERSION` | `release.sh`, `bundle.sh` | Version to tag |
 | `DEPLOY_VERSION` | `deploy.sh`, `bundle.sh --deploy-only` | Version to deploy |
 | `DEPLOY_BASE_PATH` | `deploy.sh`, `bundle.sh` | Deploy root path |
-| `GITLAB_TOKEN` | `deploy.sh`, `bundle.sh` | GitLab API token (api scope) |

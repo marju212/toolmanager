@@ -2,8 +2,8 @@
 #
 # Prerequisites:
 #   - Python 3.12+ must be available in the CI image.
-#   - For deploy/bundle: set GITLAB_TOKEN as a CI/CD variable
-#     (Settings > CI/CD > Variables) with api scope. Mark it "Masked".
+#   - Set DEPLOY_BASE_PATH as a CI/CD variable (Settings > CI/CD > Variables).
+#   - Ensure the CI runner has write access to DEPLOY_BASE_PATH on the target host.
 #
 # Trigger jobs manually from the GitLab UI by setting the appropriate variable:
 #   RELEASE_VERSION   e.g. 1.2.3   (triggers release or bundle-release)

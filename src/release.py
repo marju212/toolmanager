@@ -174,11 +174,12 @@ def main(argv: list = None) -> None:
                       "(expected X.Y.Z)")
             raise SystemExit(1)
         new_version = args["cli_version"]
-        check_version_available(new_version, config.tag_prefix, config.remote)
+        check_version_available(new_version, config.tag_prefix)
         log_success(f"Will release {config.tag_prefix}{new_version}")
     else:
-        new_version = prompt_version(current_version, config.tag_prefix)
-        check_version_available(new_version, config.tag_prefix, config.remote)
+        new_version = prompt_version(current_version, config.tag_prefix,
+                                     non_interactive=non_interactive)
+        check_version_available(new_version, config.tag_prefix)
         log_success(f"Will release {config.tag_prefix}{new_version}")
 
     release_tag = f"{config.tag_prefix}{new_version}"

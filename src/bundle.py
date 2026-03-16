@@ -16,6 +16,7 @@ Options:
 """
 
 import os
+import subprocess
 import sys
 from typing import Optional
 
@@ -233,6 +234,10 @@ def deploy_bundle(
         mf_base_path: Override base directory for modulefiles. If unset,
             modulefiles go to deploy_base_path/mf/bundle_name/version.
     """
+    if not os.path.isabs(deploy_base_path):
+        log_error(f"DEPLOY_BASE_PATH must be an absolute path: {deploy_base_path}")
+        raise SystemExit(1)
+
     mf_base = mf_base_path or os.path.join(deploy_base_path, "mf")
     mf_dir = os.path.join(mf_base, bundle_name)
     mf_file = os.path.join(mf_dir, version)
@@ -279,11 +284,12 @@ def bundle_flow(args: dict, config) -> None:
                       "(expected X.Y.Z)")
             raise SystemExit(1)
         new_version = args["cli_version"]
-        check_version_available(new_version, config.tag_prefix, config.remote)
+        check_version_available(new_version, config.tag_prefix)
         log_success(f"Will release {config.tag_prefix}{new_version}")
     else:
-        new_version = prompt_version(current_version, config.tag_prefix)
-        check_version_available(new_version, config.tag_prefix, config.remote)
+        new_version = prompt_version(current_version, config.tag_prefix,
+                                     non_interactive=non_interactive)
+        check_version_available(new_version, config.tag_prefix)
         log_success(f"Will release {config.tag_prefix}{new_version}")
 
     release_tag = f"{config.tag_prefix}{new_version}"
@@ -402,8 +408,13 @@ def bundle_deploy_only_flow(args: dict, config) -> None:
         # Checkout tag (detached)
         if not dry_run:
             log_info(f"Checking out {release_tag}...")
-            run_git("checkout", release_tag)
-            run_git("submodule", "update", "--init")
+            try:
+                run_git("checkout", release_tag)
+                run_git("submodule", "update", "--init")
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() if e.stderr and e.stderr.strip() else str(e)
+                log_error(f"Failed to checkout {release_tag}: {detail}")
+                raise SystemExit(1)
 
         # Detect submodules
         submodules = detect_submodules(submodule_dir, config.tag_prefix)

@@ -23,55 +23,49 @@ class TestParseConfFile(unittest.TestCase):
         return path
 
     def test_basic_key_value(self):
-        path = self._write_conf("GITLAB_TOKEN=abc123\nDEFAULT_BRANCH=develop\n")
+        path = self._write_conf("TAG_PREFIX=rel-\nDEFAULT_BRANCH=develop\n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "abc123")
+        self.assertEqual(result["TAG_PREFIX"], "rel-")
         self.assertEqual(result["DEFAULT_BRANCH"], "develop")
 
     def test_comments_skipped(self):
-        path = self._write_conf("# Comment\nGITLAB_TOKEN=abc\n# Another\n")
+        path = self._write_conf("# Comment\nDEFAULT_BRANCH=develop\n# Another\n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "abc")
+        self.assertEqual(result["DEFAULT_BRANCH"], "develop")
         self.assertEqual(len(result), 1)
 
     def test_blank_lines_skipped(self):
-        path = self._write_conf("\n\nGITLAB_TOKEN=abc\n\n")
+        path = self._write_conf("\n\nDEFAULT_BRANCH=develop\n\n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "abc")
+        self.assertEqual(result["DEFAULT_BRANCH"], "develop")
 
     def test_double_quoted_value(self):
-        path = self._write_conf('GITLAB_TOKEN="abc123"\n')
+        path = self._write_conf('TAG_PREFIX="rel-"\n')
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "abc123")
+        self.assertEqual(result["TAG_PREFIX"], "rel-")
 
     def test_single_quoted_value(self):
-        path = self._write_conf("GITLAB_TOKEN='abc123'\n")
+        path = self._write_conf("TAG_PREFIX='rel-'\n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "abc123")
+        self.assertEqual(result["TAG_PREFIX"], "rel-")
 
     def test_whitespace_trimming(self):
-        path = self._write_conf("GITLAB_TOKEN =  abc123  \n")
+        path = self._write_conf("TAG_PREFIX =  rel-  \n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "abc123")
+        self.assertEqual(result["TAG_PREFIX"], "rel-")
 
     def test_all_known_keys(self):
         content = """
-GITLAB_TOKEN=token
-GITLAB_API_URL=https://gitlab.self-hosted.com/api/v4
 DEFAULT_BRANCH=develop
 TAG_PREFIX=release-
 REMOTE=upstream
-VERIFY_SSL=false
 DEPLOY_BASE_PATH=/opt/tools
 """
         path = self._write_conf(content)
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_TOKEN"], "token")
-        self.assertEqual(result["GITLAB_API_URL"], "https://gitlab.self-hosted.com/api/v4")
         self.assertEqual(result["DEFAULT_BRANCH"], "develop")
         self.assertEqual(result["TAG_PREFIX"], "release-")
         self.assertEqual(result["REMOTE"], "upstream")
-        self.assertEqual(result["VERIFY_SSL"], "false")
         self.assertEqual(result["DEPLOY_BASE_PATH"], "/opt/tools")
 
     def test_nonexistent_file(self):
@@ -79,9 +73,9 @@ DEPLOY_BASE_PATH=/opt/tools
         self.assertEqual(result, {})
 
     def test_value_with_equals(self):
-        path = self._write_conf("GITLAB_API_URL=https://host.com/api/v4?foo=bar\n")
+        path = self._write_conf("DEPLOY_BASE_PATH=/opt/foo=bar\n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["GITLAB_API_URL"], "https://host.com/api/v4?foo=bar")
+        self.assertEqual(result["DEPLOY_BASE_PATH"], "/opt/foo=bar")
 
     def test_removed_update_default_branch_is_unknown(self):
         """UPDATE_DEFAULT_BRANCH was removed; it must not be silently applied."""
@@ -112,11 +106,9 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_defaults(self):
         config = load_config()
-        self.assertEqual(config.gitlab_api_url, "https://gitlab.com/api/v4")
         self.assertEqual(config.default_branch, "main")
         self.assertEqual(config.tag_prefix, "v")
         self.assertEqual(config.remote, "origin")
-        self.assertFalse(config.verify_ssl)
         self.assertEqual(config.deploy_base_path, "")
         self.assertEqual(config.mf_base_path, "")
 
@@ -140,11 +132,6 @@ class TestLoadConfig(unittest.TestCase):
     def test_missing_config_file_exits(self):
         with self.assertRaises(SystemExit):
             load_config(config_file="/nonexistent/config")
-
-    def test_verify_ssl_false(self):
-        path = self._write_conf("VERIFY_SSL=false\n")
-        config = load_config(config_file=path)
-        self.assertFalse(config.verify_ssl)
 
     def test_repo_config(self):
         tmpdir = tempfile.mkdtemp()

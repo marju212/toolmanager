@@ -129,9 +129,9 @@ def get_latest_version(tag_prefix: str, cwd: Optional[str] = None) -> str:
     return "0.0.0"
 
 
-def check_version_available(version: str, tag_prefix: str, remote: str,
+def check_version_available(version: str, tag_prefix: str,
                             cwd: Optional[str] = None) -> None:
-    """Check that the tag doesn't already exist.
+    """Check that the tag doesn't already exist locally.
 
     Raises SystemExit if the version is taken.
     """
@@ -227,44 +227,5 @@ def extract_tool_name(remote: str, cwd: Optional[str] = None) -> Tuple[str, str]
 
     tool_name = project_path.rsplit("/", 1)[-1]
     return tool_name, remote_url
-
-
-def submodule_status(cwd: Optional[str] = None) -> List[dict]:
-    """List submodules with their commit, path, and tag info.
-
-    Returns list of dicts with keys: name, path, commit, tag.
-    """
-    result = _run_git("submodule", "status", cwd=cwd, check=False)
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
-    submodules = []
-    for line in result.stdout.strip().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Format: " <commit> <path> (<describe>)" or "+<commit> <path> (<describe>)"
-        # Strip leading +/- indicators
-        if line[0] in "+-":
-            line = line[1:]
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        commit = parts[0]
-        path = parts[1]
-        name = os.path.basename(path)
-        # Try to get tag at this commit
-        tag_result = _run_git("-C", path, "describe", "--tags", "--exact-match",
-                              "HEAD", cwd=cwd, check=False)
-        tag = tag_result.stdout.strip() if tag_result.returncode == 0 else ""
-
-        submodules.append({
-            "name": name,
-            "path": path,
-            "commit": commit,
-            "tag": tag,
-        })
-
-    return submodules
 
 

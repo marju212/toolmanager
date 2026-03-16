@@ -10,43 +10,20 @@
 #   3. --config FILE           (explicit flag)
 #   4. Environment variables   (highest priority)
 
-# GitLab personal access token (used by deploy.sh and bundle.sh for API calls).
-# Needs api scope. Token is resolved in this order:
-#   1. GITLAB_TOKEN environment variable  (export GITLAB_TOKEN=glpat-...)
-#   2. GITLAB_TOKEN key in a .release.conf file
-#   3. ~/.gitlab_token plain-text file    (echo "glpat-..." > ~/.gitlab_token)
-#
-# IMPORTANT: Do NOT put tokens in this file or any committed file.
-# Set the token via an exported env var or ~/.gitlab_token:
-#   export GITLAB_TOKEN=glpat-...
-# or:
-#   echo "glpat-..." > ~/.gitlab_token && chmod 600 ~/.gitlab_token
-#
-# Any file containing secrets should be mode 600:
-#   chmod 600 ~/.release.conf
-
-# GitLab API base URL. Change this for self-hosted GitLab instances.
-# Env var: GITLAB_API_URL
-GITLAB_API_URL=https://gitlab.com/api/v4
-
-# Branch to release from.
+# Branch to release from. Default: main
 # Env var: RELEASE_DEFAULT_BRANCH
-DEFAULT_BRANCH=main
+# DEFAULT_BRANCH=main
 
-# Prefix for version tags (e.g. "v" produces tags like v1.2.3).
+# Prefix for version tags (e.g. "v" produces tags like v1.2.3). Default: v
 # Env var: RELEASE_TAG_PREFIX
-TAG_PREFIX=v
+# TAG_PREFIX=v
 
-# Git remote name.
+# Git remote name. Default: origin
 # Env var: RELEASE_REMOTE
-REMOTE=origin
+# REMOTE=origin
 
-# Verify SSL certificates. Set to false for self-hosted GitLab with
-# self-signed certificates.
-# Env var: GITLAB_VERIFY_SSL
-VERIFY_SSL=false
-
-# Base path for deploy (clone + modulefile). If unset, deploy is skipped.
+# Base path for deploy (clone + modulefile).
+# Required by deploy.sh; bundle.sh skips the modulefile deploy step if unset.
 # The deploy step clones into DEPLOY_BASE_PATH/<tool>/<version> and writes
 # a modulefile to DEPLOY_BASE_PATH/mf/<tool>/<version>.
 # Env var: DEPLOY_BASE_PATH

@@ -5,8 +5,7 @@ Priority (highest wins):
   2. --config FILE (explicit)
   3. <repo>/.release.conf
   4. ~/.release.conf
-  5. ~/.gitlab_token (token only)
-  6. Defaults
+  5. Defaults
 """
 
 import os
@@ -19,12 +18,9 @@ from .log import log_info, log_warn, log_error
 
 # Snapshot environment variables at import time so config files cannot override.
 _ENV_SNAPSHOT = {
-    "GITLAB_TOKEN": os.environ.get("GITLAB_TOKEN", ""),
-    "GITLAB_API_URL": os.environ.get("GITLAB_API_URL", ""),
     "RELEASE_DEFAULT_BRANCH": os.environ.get("RELEASE_DEFAULT_BRANCH", ""),
     "RELEASE_TAG_PREFIX": os.environ.get("RELEASE_TAG_PREFIX", ""),
     "RELEASE_REMOTE": os.environ.get("RELEASE_REMOTE", ""),
-    "GITLAB_VERIFY_SSL": os.environ.get("GITLAB_VERIFY_SSL", ""),
     "DEPLOY_BASE_PATH": os.environ.get("DEPLOY_BASE_PATH", ""),
     "BUNDLE_SUBMODULE_DIR": os.environ.get("BUNDLE_SUBMODULE_DIR", ""),
     "BUNDLE_NAME": os.environ.get("BUNDLE_NAME", ""),
@@ -34,12 +30,9 @@ _ENV_SNAPSHOT = {
 
 # Config key -> env var mapping
 _CONFIG_KEY_TO_ENV = {
-    "GITLAB_TOKEN": "GITLAB_TOKEN",
-    "GITLAB_API_URL": "GITLAB_API_URL",
     "DEFAULT_BRANCH": "RELEASE_DEFAULT_BRANCH",
     "TAG_PREFIX": "RELEASE_TAG_PREFIX",
     "REMOTE": "RELEASE_REMOTE",
-    "VERIFY_SSL": "GITLAB_VERIFY_SSL",
     "DEPLOY_BASE_PATH": "DEPLOY_BASE_PATH",
     "BUNDLE_SUBMODULE_DIR": "BUNDLE_SUBMODULE_DIR",
     "BUNDLE_NAME": "BUNDLE_NAME",
@@ -55,12 +48,9 @@ _KNOWN_KEYS = set(_CONFIG_KEY_TO_ENV.keys())
 class Config:
     """Resolved configuration values."""
 
-    gitlab_token: str = ""
-    gitlab_api_url: str = "https://gitlab.com/api/v4"
     default_branch: str = "main"
     tag_prefix: str = "v"
     remote: str = "origin"
-    verify_ssl: bool = False
     deploy_base_path: str = ""
     bundle_submodule_dir: str = ""
     bundle_name: str = ""
@@ -123,18 +113,12 @@ def _parse_conf_file(filepath: str) -> dict:
 
 def _apply_conf(config: Config, conf: dict) -> None:
     """Apply a parsed config dict to a Config object."""
-    if "GITLAB_TOKEN" in conf:
-        config.gitlab_token = conf["GITLAB_TOKEN"]
-    if "GITLAB_API_URL" in conf:
-        config.gitlab_api_url = conf["GITLAB_API_URL"]
     if "DEFAULT_BRANCH" in conf:
         config.default_branch = conf["DEFAULT_BRANCH"]
     if "TAG_PREFIX" in conf:
         config.tag_prefix = conf["TAG_PREFIX"]
     if "REMOTE" in conf:
         config.remote = conf["REMOTE"]
-    if "VERIFY_SSL" in conf:
-        config.verify_ssl = conf["VERIFY_SSL"].lower() in ("true", "1", "yes")
     if "DEPLOY_BASE_PATH" in conf:
         config.deploy_base_path = conf["DEPLOY_BASE_PATH"]
     if "BUNDLE_SUBMODULE_DIR" in conf:
@@ -166,16 +150,6 @@ def load_config(
     config = Config()
     home = Path.home()
 
-    # 0. Load token from ~/.gitlab_token if not set via env
-    if not _ENV_SNAPSHOT["GITLAB_TOKEN"]:
-        token_file = home / ".gitlab_token"
-        if token_file.is_file():
-            _warn_file_permissions(str(token_file))
-            token = token_file.read_text().strip()
-            if token:
-                config.gitlab_token = token
-                log_info("Loaded token from ~/.gitlab_token")
-
     # 1. User-level config
     user_conf = home / ".release.conf"
     if user_conf.is_file():
@@ -201,18 +175,12 @@ def load_config(
         _apply_conf(config, _parse_conf_file(config_file))
 
     # 4. Env vars override everything (from snapshot)
-    if _ENV_SNAPSHOT["GITLAB_TOKEN"]:
-        config.gitlab_token = _ENV_SNAPSHOT["GITLAB_TOKEN"]
-    if _ENV_SNAPSHOT["GITLAB_API_URL"]:
-        config.gitlab_api_url = _ENV_SNAPSHOT["GITLAB_API_URL"]
     if _ENV_SNAPSHOT["RELEASE_DEFAULT_BRANCH"]:
         config.default_branch = _ENV_SNAPSHOT["RELEASE_DEFAULT_BRANCH"]
     if _ENV_SNAPSHOT["RELEASE_TAG_PREFIX"]:
         config.tag_prefix = _ENV_SNAPSHOT["RELEASE_TAG_PREFIX"]
     if _ENV_SNAPSHOT["RELEASE_REMOTE"]:
         config.remote = _ENV_SNAPSHOT["RELEASE_REMOTE"]
-    if _ENV_SNAPSHOT["GITLAB_VERIFY_SSL"]:
-        config.verify_ssl = _ENV_SNAPSHOT["GITLAB_VERIFY_SSL"].lower() in ("true", "1", "yes")
     if _ENV_SNAPSHOT["DEPLOY_BASE_PATH"]:
         config.deploy_base_path = _ENV_SNAPSHOT["DEPLOY_BASE_PATH"]
     if _ENV_SNAPSHOT["BUNDLE_SUBMODULE_DIR"]:

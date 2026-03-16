@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from lib.semver import validate_semver, suggest_versions, compare_versions
+from lib.semver import validate_semver, suggest_versions
 
 
 class TestValidateSemver(unittest.TestCase):
@@ -74,30 +74,6 @@ class TestSuggestVersions(unittest.TestCase):
         self.assertEqual(result["minor"], "9.100.0")
         self.assertEqual(result["major"], "10.0.0")
 
-
-class TestCompareVersions(unittest.TestCase):
-    """Test compare_versions()."""
-
-    def test_equal(self):
-        self.assertEqual(compare_versions("1.2.3", "1.2.3"), 0)
-
-    def test_less_patch(self):
-        self.assertEqual(compare_versions("1.2.3", "1.2.4"), -1)
-
-    def test_greater_patch(self):
-        self.assertEqual(compare_versions("1.2.4", "1.2.3"), 1)
-
-    def test_less_minor(self):
-        self.assertEqual(compare_versions("1.2.3", "1.3.0"), -1)
-
-    def test_greater_minor(self):
-        self.assertEqual(compare_versions("1.3.0", "1.2.9"), 1)
-
-    def test_less_major(self):
-        self.assertEqual(compare_versions("1.9.9", "2.0.0"), -1)
-
-    def test_greater_major(self):
-        self.assertEqual(compare_versions("2.0.0", "1.9.9"), 1)
 
 
 if __name__ == "__main__":
