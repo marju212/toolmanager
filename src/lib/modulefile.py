@@ -2,7 +2,6 @@
 
 import os
 import re
-from typing import Dict, Optional
 
 from .log import log_info, log_warn, log_error, log_success
 
@@ -51,7 +50,7 @@ def substitute_placeholders(
     root: str = "",
     tool_name: str = "",
     deploy_base_path: str = "",
-    tool_versions: Optional[Dict[str, str]] = None,
+    tool_versions: dict[str, str] | None = None,
 ) -> str:
     """Replace placeholders in a modulefile template.
 
@@ -97,7 +96,7 @@ def substitute_placeholders(
 
 def validate_template_placeholders(
     template: str,
-    tool_versions: Dict[str, str],
+    tool_versions: dict[str, str],
 ) -> None:
     """Validate that per-tool placeholders in a template reference existing submodules.
 
@@ -119,7 +118,7 @@ def validate_template_placeholders(
 def resolve_template(
     deploy_dir: str = "",
     config_template_path: str = "",
-) -> Optional[str]:
+) -> str | None:
     """Resolve which modulefile template to use.
 
     Priority:
@@ -165,9 +164,9 @@ def generate_bundle_modulefile(
     bundle_name: str,
     version: str,
     deploy_base_path: str,
-    tool_versions: Dict[str, str],
+    tool_versions: dict[str, str],
     template_path: str = "",
-    template_content: Optional[str] = None,
+    template_content: str | None = None,
 ) -> str:
     """Generate a bundle modulefile.
 
@@ -285,7 +284,7 @@ def copy_and_update_modulefile(
     log_success(f"Modulefile copied and updated to {dest_path}")
 
 
-def find_latest_modulefile(mf_dir: str) -> Optional[str]:
+def find_latest_modulefile(mf_dir: str) -> str | None:
     """Find the latest semver modulefile in a directory.
 
     Returns full path to the latest modulefile, or None.

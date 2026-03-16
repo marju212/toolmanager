@@ -4,13 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-dev-utils is a collection of Python utility scripts for DevOps workflows, with thin Bash wrappers for CLI compatibility. The system consists of three tools:
+toolmanager is a collection of Python utility scripts for DevOps workflows, with thin Bash wrappers for CLI compatibility. The system consists of two tools:
 
-- **`release.sh` → `src/release.py`** — Release automation (tag from main + changelog; no branches, no GitLab API)
-- **`deploy.sh` → `src/deploy.py`** — Deploy tagged releases (clone + bootstrap + modulefile)
-- **`bundle.sh` → `src/bundle.py`** — Toolset bundle management (submodule detection + bundle release + bundle deploy)
+- **`release.sh` → `src/release.py`** — Release automation (annotated tag from main + changelog; no branches, no GitLab API)
+- **`deploy.sh` → `src/deploy.py`** — Manifest-driven deploy tool: subcommand-based, reads `tools.json` for source configuration and version tracking
 
-All three share a common library in `src/lib/` (config, git, log, semver, modulefile, prompt).
+Both share a common library in `src/lib/` (config, git, log, semver, modulefile, manifest, sources, prompt).
 
 ## Technology
 
@@ -35,7 +34,7 @@ python3 -m unittest tests.test_semver.TestValidateSemver.test_valid_versions
 python3 -m unittest discover tests/ -p "test_*.py" -v
 ```
 
-Test files: `test_config`, `test_semver`, `test_git`, `test_modulefile`, `test_release`, `test_deploy`, `test_bundle`.
+Test files: `test_config`, `test_semver`, `test_git`, `test_modulefile`, `test_manifest`, `test_release`, `test_deploy`.
 
 ### Running the Scripts
 
@@ -43,8 +42,10 @@ Test files: `test_config`, `test_semver`, `test_git`, `test_modulefile`, `test_r
 ./scripts/release.sh --dry-run                              # validate without side effects
 ./scripts/release.sh --version 1.2.3 -n                     # non-interactive release
 ./scripts/release.sh --version 1.2.3 --description "text"   # release with description
-./scripts/deploy.sh --version 1.2.3 --deploy-path /opt/software
-./scripts/bundle.sh --version 1.0.0 --deploy-path /opt/software -n
+./scripts/deploy.sh deploy my-tool --version 1.2.3           # deploy a specific version
+./scripts/deploy.sh scan                                     # check all tools for updates
+./scripts/deploy.sh upgrade my-tool                          # deploy latest version
+./scripts/deploy.sh toolset science --version 1.0.0          # write toolset modulefile
 ```
 
 ## Architecture
@@ -60,15 +61,16 @@ src/
 │   ├── log.py                 # Color-coded logging (log_info, log_warn, log_error, log_success)
 │   ├── semver.py              # Semver validation and version suggestion
 │   ├── modulefile.py          # Modulefile generation + template substitution
+│   ├── manifest.py            # tools.json read/write and validation
+│   ├── sources.py             # GitAdapter and DiskAdapter (SourceError exception)
 │   └── prompt.py              # Interactive prompts (confirm, version picker)
 ├── release.py                 # Release tool: annotated tag from main + changelog
-├── deploy.py                  # Deploy tool: clone + bootstrap + modulefile
-└── bundle.py                  # Bundle tool: submodule detection + bundle release + deploy
+└── deploy.py                  # Deploy tool: subcommand-driven (deploy/scan/upgrade/toolset)
 
 scripts/
 ├── release.sh                 # Thin wrapper: exec python3 src/release.py "$@"
 ├── deploy.sh                  # Thin wrapper: exec python3 src/deploy.py "$@"
-└── bundle.sh                  # Thin wrapper: exec python3 src/bundle.py "$@"
+└── .release.conf.example      # Annotated config file template
 ```
 
 ### Key Design Patterns
@@ -76,12 +78,15 @@ scripts/
 - Every write operation respects `dry_run` — full validation runs without side effects
 - Environment variables are snapshotted at import time so config files cannot override them
 - Release flow tags from main only — no release branches, no hotfix MRs, no GitLab API calls
-- Bootstrap support: `install.sh` (priority) or `install.py` in tool repos
-- Modulefile template chain: repo `modulefile.tcl` > config template > default
-- Bundle modulefiles support per-tool version placeholders (`%tool-name%`, `%TOOL_LOADS%`)
+- `deploy.sh` is subcommand-driven: `deploy`, `scan`, `upgrade`, `toolset`
+- Source adapters (`GitAdapter`, `DiskAdapter`) raise `SourceError` on failure; callers log and exit
+- Bootstrap support: `install.sh` (priority) or `install.py` in tool repos (git source only)
+- Modulefile template chain: previous version copy > repo `modulefile.tcl` > config template > default
+- Toolset modulefiles support per-tool version placeholders (`%tool-name%`, `%TOOL_LOADS%`)
+- `tools.json` manifest: `version` field updated automatically on deploy; source config maintained manually
 
 ### Test Infrastructure
 
 Tests use Python `unittest`. Shared helpers in `tests/conftest.py` provide:
 - `setup_test_repo()` — creates a bare remote + working clone per test
-- `setup_bundle_test_repo()` — creates parent + 2 sub-tool repos with submodules
+- `install_git_mock()` / `uninstall_git_mock()` — intercepts `lib.git._run_git` for integration tests

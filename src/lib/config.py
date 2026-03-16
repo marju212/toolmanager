@@ -22,10 +22,9 @@ _ENV_SNAPSHOT = {
     "RELEASE_TAG_PREFIX": os.environ.get("RELEASE_TAG_PREFIX", ""),
     "RELEASE_REMOTE": os.environ.get("RELEASE_REMOTE", ""),
     "DEPLOY_BASE_PATH": os.environ.get("DEPLOY_BASE_PATH", ""),
-    "BUNDLE_SUBMODULE_DIR": os.environ.get("BUNDLE_SUBMODULE_DIR", ""),
-    "BUNDLE_NAME": os.environ.get("BUNDLE_NAME", ""),
     "MODULEFILE_TEMPLATE": os.environ.get("MODULEFILE_TEMPLATE", ""),
     "MF_BASE_PATH": os.environ.get("MF_BASE_PATH", ""),
+    "TOOLS_MANIFEST": os.environ.get("TOOLS_MANIFEST", ""),
 }
 
 # Config key -> env var mapping
@@ -34,10 +33,9 @@ _CONFIG_KEY_TO_ENV = {
     "TAG_PREFIX": "RELEASE_TAG_PREFIX",
     "REMOTE": "RELEASE_REMOTE",
     "DEPLOY_BASE_PATH": "DEPLOY_BASE_PATH",
-    "BUNDLE_SUBMODULE_DIR": "BUNDLE_SUBMODULE_DIR",
-    "BUNDLE_NAME": "BUNDLE_NAME",
     "MODULEFILE_TEMPLATE": "MODULEFILE_TEMPLATE",
     "MF_BASE_PATH": "MF_BASE_PATH",
+    "TOOLS_MANIFEST": "TOOLS_MANIFEST",
 }
 
 # Known config keys
@@ -52,10 +50,9 @@ class Config:
     tag_prefix: str = "v"
     remote: str = "origin"
     deploy_base_path: str = ""
-    bundle_submodule_dir: str = ""
-    bundle_name: str = ""
     modulefile_template: str = ""
     mf_base_path: str = ""
+    tools_manifest: str = ""
 
 
 def _warn_file_permissions(filepath: str) -> None:
@@ -121,14 +118,12 @@ def _apply_conf(config: Config, conf: dict) -> None:
         config.remote = conf["REMOTE"]
     if "DEPLOY_BASE_PATH" in conf:
         config.deploy_base_path = conf["DEPLOY_BASE_PATH"]
-    if "BUNDLE_SUBMODULE_DIR" in conf:
-        config.bundle_submodule_dir = conf["BUNDLE_SUBMODULE_DIR"]
-    if "BUNDLE_NAME" in conf:
-        config.bundle_name = conf["BUNDLE_NAME"]
     if "MODULEFILE_TEMPLATE" in conf:
         config.modulefile_template = conf["MODULEFILE_TEMPLATE"]
     if "MF_BASE_PATH" in conf:
         config.mf_base_path = conf["MF_BASE_PATH"]
+    if "TOOLS_MANIFEST" in conf:
+        config.tools_manifest = conf["TOOLS_MANIFEST"]
 
 
 def load_config(
@@ -136,6 +131,7 @@ def load_config(
     repo_root: str = "",
     cli_deploy_path: str = "",
     cli_mf_path: str = "",
+    cli_manifest: str = "",
 ) -> Config:
     """Load configuration with multi-level priority.
 
@@ -143,6 +139,8 @@ def load_config(
         config_file: Explicit config file path (from --config).
         repo_root: Repository root directory.
         cli_deploy_path: CLI --deploy-path override.
+        cli_mf_path: CLI --mf-path override.
+        cli_manifest: CLI --manifest override.
 
     Returns:
         Resolved Config object.
@@ -183,19 +181,19 @@ def load_config(
         config.remote = _ENV_SNAPSHOT["RELEASE_REMOTE"]
     if _ENV_SNAPSHOT["DEPLOY_BASE_PATH"]:
         config.deploy_base_path = _ENV_SNAPSHOT["DEPLOY_BASE_PATH"]
-    if _ENV_SNAPSHOT["BUNDLE_SUBMODULE_DIR"]:
-        config.bundle_submodule_dir = _ENV_SNAPSHOT["BUNDLE_SUBMODULE_DIR"]
-    if _ENV_SNAPSHOT["BUNDLE_NAME"]:
-        config.bundle_name = _ENV_SNAPSHOT["BUNDLE_NAME"]
     if _ENV_SNAPSHOT["MODULEFILE_TEMPLATE"]:
         config.modulefile_template = _ENV_SNAPSHOT["MODULEFILE_TEMPLATE"]
     if _ENV_SNAPSHOT["MF_BASE_PATH"]:
         config.mf_base_path = _ENV_SNAPSHOT["MF_BASE_PATH"]
+    if _ENV_SNAPSHOT["TOOLS_MANIFEST"]:
+        config.tools_manifest = _ENV_SNAPSHOT["TOOLS_MANIFEST"]
 
     # 5. CLI overrides take highest precedence
     if cli_deploy_path:
         config.deploy_base_path = cli_deploy_path
     if cli_mf_path:
         config.mf_base_path = cli_mf_path
+    if cli_manifest:
+        config.tools_manifest = cli_manifest
 
     return config

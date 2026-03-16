@@ -6,14 +6,13 @@ from typing import Optional
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
-def validate_semver(version: str) -> bool:
+def validate_semver(version: str) -> None:
     """Validate strict X.Y.Z semver format.
 
-    Returns True if valid, raises ValueError if invalid.
+    Returns None if valid, raises ValueError if invalid.
     """
     if not _SEMVER_RE.match(version):
         raise ValueError(f"Invalid semver format: '{version}' (expected X.Y.Z)")
-    return True
 
 
 def suggest_versions(current: str) -> dict:

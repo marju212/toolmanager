@@ -1,16 +1,13 @@
 """Git operations via subprocess."""
 
 import os
-import re
 import subprocess
-from typing import List, Optional, Tuple
 
 from .log import log_info, log_warn, log_error, log_success
+from .semver import validate_semver
 
-_SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
-
-def _run_git(*args: str, cwd: Optional[str] = None, check: bool = True,
+def _run_git(*args: str, cwd: str | None = None, check: bool = True,
              capture: bool = True) -> subprocess.CompletedProcess:
     """Run a git command and return the result."""
     cmd = ["git"] + list(args)
@@ -23,11 +20,7 @@ def _run_git(*args: str, cwd: Optional[str] = None, check: bool = True,
     )
 
 
-# Public alias for use by callers outside this module.
-run_git = _run_git
-
-
-def get_repo_root(path: Optional[str] = None) -> str:
+def get_repo_root(path: str | None = None) -> str:
     """Get the repository root directory."""
     try:
         result = _run_git("rev-parse", "--show-toplevel", cwd=path)
@@ -36,7 +29,7 @@ def get_repo_root(path: Optional[str] = None) -> str:
         return os.getcwd()
 
 
-def check_branch(default_branch: str, remote: str, cwd: Optional[str] = None) -> None:
+def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> None:
     """Validate repository state: correct branch, clean tree, synced with remote.
 
     Raises SystemExit on validation failure.
@@ -105,7 +98,7 @@ def check_branch(default_branch: str, remote: str, cwd: Optional[str] = None) ->
     log_success("Repository is clean and in sync.")
 
 
-def get_latest_version(tag_prefix: str, cwd: Optional[str] = None) -> str:
+def get_latest_version(tag_prefix: str, cwd: str | None = None) -> str:
     """Get the latest strict semver version from tags.
 
     Returns version string without prefix (e.g. '1.2.3'), or '0.0.0' if no tags.
@@ -122,15 +115,18 @@ def get_latest_version(tag_prefix: str, cwd: Optional[str] = None) -> str:
         if not tag:
             continue
         version = tag[len(tag_prefix):] if tag.startswith(tag_prefix) else tag
-        if _SEMVER_RE.match(version):
+        try:
+            validate_semver(version)
             return version
+        except ValueError:
+            pass
 
     log_info("No version tags found — treating as first release.")
     return "0.0.0"
 
 
 def check_version_available(version: str, tag_prefix: str,
-                            cwd: Optional[str] = None) -> None:
+                            cwd: str | None = None) -> None:
     """Check that the tag doesn't already exist locally.
 
     Raises SystemExit if the version is taken.
@@ -143,7 +139,7 @@ def check_version_available(version: str, tag_prefix: str,
 
 
 def generate_changelog(from_version: str, tag_prefix: str,
-                       cwd: Optional[str] = None) -> str:
+                       cwd: str | None = None) -> str:
     """Generate markdown changelog from commits since the given version tag.
 
     Returns changelog string.
@@ -167,7 +163,7 @@ def generate_changelog(from_version: str, tag_prefix: str,
 
 
 def tag_release(tag_name: str, version: str, changelog: str, remote: str,
-                dry_run: bool = False, cwd: Optional[str] = None,
+                dry_run: bool = False, cwd: str | None = None,
                 description: str = "") -> None:
     """Create and push an annotated tag."""
     log_info(f"Creating annotated tag '{tag_name}'...")
@@ -183,49 +179,3 @@ def tag_release(tag_name: str, version: str, changelog: str, remote: str,
     _run_git("tag", "-a", tag_name, "-m", message, cwd=cwd)
     _run_git("push", remote, tag_name, cwd=cwd)
     log_success(f"Tag '{tag_name}' created and pushed.")
-
-
-def get_remote_url(remote: str, cwd: Optional[str] = None) -> str:
-    """Get the URL of a git remote."""
-    result = _run_git("remote", "get-url", remote, cwd=cwd, check=False)
-    return result.stdout.strip() if result.returncode == 0 else ""
-
-
-def parse_project_path(remote_url: str) -> str:
-    """Extract project path from a git remote URL.
-
-    Supports SSH and HTTPS formats, including nested groups.
-    Returns empty string if parsing fails.
-    """
-    # SSH: git@gitlab.com:group/subgroup/project.git
-    m = re.match(r"^git@[^:]+:(.+?)(?:\.git)?$", remote_url)
-    if m:
-        return m.group(1)
-
-    # HTTPS: https://gitlab.com/group/subgroup/project.git
-    m = re.match(r"^https?://[^/]+/(.+?)(?:\.git)?$", remote_url)
-    if m:
-        return m.group(1)
-
-    return ""
-
-
-def extract_tool_name(remote: str, cwd: Optional[str] = None) -> Tuple[str, str]:
-    """Extract tool name from the git remote URL.
-
-    Returns (tool_name, remote_url) tuple.
-    """
-    remote_url = get_remote_url(remote, cwd=cwd)
-    if not remote_url:
-        log_error(f"Cannot determine remote URL for '{remote}'.")
-        raise SystemExit(1)
-
-    project_path = parse_project_path(remote_url)
-    if not project_path:
-        log_error(f"Cannot parse project path from remote URL: {remote_url}")
-        raise SystemExit(1)
-
-    tool_name = project_path.rsplit("/", 1)[-1]
-    return tool_name, remote_url
-
-

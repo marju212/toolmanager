@@ -14,7 +14,7 @@ class TestValidateSemver(unittest.TestCase):
 
     def test_valid_versions(self):
         for v in ("0.0.0", "1.2.3", "10.20.30", "0.0.1", "9.99.999"):
-            self.assertTrue(validate_semver(v))
+            validate_semver(v)  # must not raise
 
     def test_invalid_prefix(self):
         with self.assertRaises(ValueError):

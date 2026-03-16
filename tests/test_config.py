@@ -60,6 +60,9 @@ DEFAULT_BRANCH=develop
 TAG_PREFIX=release-
 REMOTE=upstream
 DEPLOY_BASE_PATH=/opt/tools
+MODULEFILE_TEMPLATE=/opt/templates/tool.tcl
+MF_BASE_PATH=/opt/modulefiles
+TOOLS_MANIFEST=/etc/tools.json
 """
         path = self._write_conf(content)
         result = _parse_conf_file(path)
@@ -67,6 +70,9 @@ DEPLOY_BASE_PATH=/opt/tools
         self.assertEqual(result["TAG_PREFIX"], "release-")
         self.assertEqual(result["REMOTE"], "upstream")
         self.assertEqual(result["DEPLOY_BASE_PATH"], "/opt/tools")
+        self.assertEqual(result["MODULEFILE_TEMPLATE"], "/opt/templates/tool.tcl")
+        self.assertEqual(result["MF_BASE_PATH"], "/opt/modulefiles")
+        self.assertEqual(result["TOOLS_MANIFEST"], "/etc/tools.json")
 
     def test_nonexistent_file(self):
         result = _parse_conf_file("/nonexistent/path")
@@ -142,16 +148,19 @@ class TestLoadConfig(unittest.TestCase):
         config = load_config(repo_root=tmpdir)
         self.assertEqual(config.tag_prefix, "rel-")
 
-    def test_bundle_config_keys(self):
+    def test_bundle_config_keys_are_unknown(self):
+        """BUNDLE_* keys were removed with bundle.py; they must warn, not apply."""
         path = self._write_conf(
             "BUNDLE_SUBMODULE_DIR=tools\n"
             "BUNDLE_NAME=my-toolset\n"
             "MODULEFILE_TEMPLATE=/path/to/template\n"
         )
         config = load_config(config_file=path)
-        self.assertEqual(config.bundle_submodule_dir, "tools")
-        self.assertEqual(config.bundle_name, "my-toolset")
+        # MODULEFILE_TEMPLATE is still a valid key
         self.assertEqual(config.modulefile_template, "/path/to/template")
+        # Config no longer has bundle attributes
+        self.assertFalse(hasattr(config, "bundle_submodule_dir"))
+        self.assertFalse(hasattr(config, "bundle_name"))
 
     def test_mf_base_path_conf_key(self):
         path = self._write_conf("MF_BASE_PATH=/opt/modulefiles\n")

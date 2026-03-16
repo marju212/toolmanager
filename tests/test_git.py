@@ -18,9 +18,6 @@ from lib.git import (
     generate_changelog,
     tag_release,
     check_version_available,
-    get_remote_url,
-    parse_project_path,
-    extract_tool_name,
 )
 
 
@@ -226,40 +223,6 @@ class TestCheckVersionAvailable(GitTestCase):
         # Should not raise — only the tag matters now
         check_version_available("1.0.0", "v",
                                 cwd=self.repo["work_repo"])
-
-
-class TestParseProjectPath(unittest.TestCase):
-    """Test parse_project_path()."""
-
-    def test_ssh_with_git(self):
-        result = parse_project_path("git@gitlab.com:group/project.git")
-        self.assertEqual(result, "group/project")
-
-    def test_ssh_without_git(self):
-        result = parse_project_path("git@gitlab.com:group/project")
-        self.assertEqual(result, "group/project")
-
-    def test_https_with_git(self):
-        result = parse_project_path("https://gitlab.com/group/project.git")
-        self.assertEqual(result, "group/project")
-
-    def test_https_without_git(self):
-        result = parse_project_path("https://gitlab.com/group/project")
-        self.assertEqual(result, "group/project")
-
-    def test_nested_groups(self):
-        result = parse_project_path(
-            "git@gitlab.com:group/subgroup/project.git")
-        self.assertEqual(result, "group/subgroup/project")
-
-    def test_self_hosted(self):
-        result = parse_project_path(
-            "https://gitlab.company.com/team/tool.git")
-        self.assertEqual(result, "team/tool")
-
-    def test_invalid(self):
-        result = parse_project_path("not-a-url")
-        self.assertEqual(result, "")
 
 
 if __name__ == "__main__":
