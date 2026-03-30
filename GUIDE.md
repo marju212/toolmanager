@@ -1,6 +1,52 @@
 # toolmanager — User Guide
 
-This guide covers the full lifecycle of managing tools with toolmanager: configuring a manifest, releasing new versions, deploying them, scanning for updates, and writing toolset modulefiles.
+This guide covers the full lifecycle of managing tools with toolmanager: configuring a manifest, releasing new versions, deploying them, scanning for updates, handling externally managed tools, and writing toolset modulefiles.
+
+---
+
+## Why toolmanager?
+
+### The problem
+
+Managing scientific and engineering tools on shared infrastructure is messy. Tools come from different sources — some are built from git repos, some arrive as tar archives on a network share, some are installed by IT. Keeping track of what's deployed, at which version, and making it available to users via `module load` involves a lot of manual, error-prone work.
+
+### What toolmanager gives you
+
+**One manifest as source of truth.** `tools.json` declares every tool, where it comes from, and what version is deployed. The manifest is a plain JSON file you can check into version control, review in a PR, and audit over time.
+
+**Unified handling of different sources.** Whether a tool lives in git, ships as a tar archive, or is pre-installed by IT — the workflow is the same: scan, pick a version, deploy. Three adapter types (`git`, `archive`, `external`) handle the differences behind the scenes.
+
+**Version coexistence.** Multiple versions of the same tool live side by side (`/opt/tools/numpy/1.24.0/`, `/opt/tools/numpy/2.0.0/`). Users pick the version they need with `module load numpy/1.24.0`. Nothing is overwritten — old versions stay until you explicitly remove them.
+
+**Toolsets with pinned versions.** A toolset bundles multiple tools at specific versions into one `module load science/1.0.0` command. Different toolsets can pin different versions of the same tool. This gives teams reproducible environments without forcing everyone onto the same version.
+
+**Declarative GitOps workflow.** The `apply` command reconciles the desired state in `tools.json` with what's actually on disk. The workflow is:
+
+1. `scan` — discover what's available, write it to the manifest
+2. Edit toolsets — pick versions
+3. `apply` — deploy everything that's missing
+
+This is auditable, repeatable, and works well in CI/CD.
+
+**Safe by default.** Dry-run mode on every command. Advisory file locking prevents concurrent deploys. Symlink detection prevents path attacks. External tools are blocked from deploy unless you explicitly `--force`. No files are ever silently overwritten.
+
+**No external dependencies.** Python 3.12 stdlib only — no pip, no venv, no network calls beyond git. Runs anywhere Python and git are available.
+
+**No API calls.** No GitLab/GitHub API tokens, no webhooks, no CI runners needed. Everything works through plain git tags and local filesystem operations.
+
+### When to use it
+
+- You manage tools on a shared HPC cluster, lab server, or build farm
+- You use Environment Modules (`module load`/`module avail`)
+- Your tools come from a mix of git repos, network shares, and vendor installs
+- You want version control over what's deployed and where
+- You want reproducible tool environments across teams or projects
+
+### When not to use it
+
+- You need per-user package management 
+- Your tools are all containers and not want to use module system
+- You don't use Environment Modules
 
 ---
 
@@ -43,27 +89,18 @@ chmod +x toolmanager/scripts/*.sh
 
 ### 1.2 Configuration
 
-Create a `.release.conf` to store your site's deploy paths and preferences:
+Configuration comes from two sources:
 
-```bash
-cp toolmanager/scripts/.release.conf.example .release.conf
-```
+1. **`tools.json`** — `deploy_base_path` sets the default root for all deployments.
+2. **`.release.conf`** — optional config file for release settings (branch, tag prefix, remote) and other overrides.
 
-Minimum config to use deploy:
-
-```ini
-DEPLOY_BASE_PATH=/opt/software
-TOOLS_MANIFEST=/etc/toolmanager/tools.json
-```
-
-Config is loaded in this order — later values win:
+Config files use `KEY=VALUE` format. They are loaded in this order — later values win:
 
 | Priority | Source |
 |---|---|
-| 1 (lowest) | `~/.release.conf` — personal defaults |
-| 2 | `<repo>/.release.conf` — project-level settings |
-| 3 | `--config FILE` — explicit path on the CLI |
-| 4 (highest) | Environment variables |
+| 1 (lowest) | `<repo>/.release.conf` — project-level settings |
+| 2 | `--config FILE` — explicit path on the CLI |
+| 3 (highest) | Environment variables |
 
 ### 1.3 Create tools.json
 
@@ -71,18 +108,19 @@ Create a `tools.json` file describing your tools. The path defaults to `tools.js
 
 ```json
 {
+  "deploy_base_path": "/opt/software",
   "tools": {
     "my-tool": {
-      "version": "1.2.0",
+      "version": "",
       "source": {
         "type": "git",
         "url": "git@gitlab.com:group/my-tool.git"
       }
     },
     "another-tool": {
-      "version": "3.0.0",
+      "version": "",
       "source": {
-        "type": "disk",
+        "type": "archive",
         "path": "/nfs/share/another-tool"
       }
     }
@@ -93,29 +131,90 @@ Create a `tools.json` file describing your tools. The path defaults to `tools.js
 }
 ```
 
+#### Top-level fields
+
+| Field | Default | Description |
+|---|---|---|
+| `deploy_base_path` | `"/"` | Default root directory for deployments and modulefiles. Overridden by `--deploy-path`. |
+| `tools` | `{}` | Tool definitions (see below) |
+| `toolsets` | `{}` | Named groupings of tools — legacy list format or dict format with version pins |
+
+#### Per-tool fields
+
+| Field | Required | Type | Description |
+|---|---|---|---|
+| `source` | Yes | object | Source definition (see source types below) |
+| `version` | No | string | Current deployed version — updated automatically on deploy |
+| `available` | No | list | All available versions — populated by `scan` |
+| ~~`deploy`~~ | — | — | **Removed.** Use source type `"external"` instead (see Part 6). |
+| `install_path` | No | string | Custom deploy path. Relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` placeholders. |
+| `mf_path` | No | string | Custom modulefile path. Relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` placeholders. |
+| `bootstrap` | No | string | Shell command to run after deployment completes |
+| `flatten_archive` | No | boolean | For archive sources: flatten single-root directories after extraction (default: `true`) |
+
 #### Source types
 
 | Type | Required fields | Description |
 |---|---|---|
 | `git` | `url` | Clones a tag from any git remote |
-| `disk` | `path` | Tool already lives on disk as semver-named subdirectories |
+| `archive` | `path` | Tools packaged as archives (.tar.gz, .zip, etc.) on a shared disk. Archives are extracted on deploy. |
+| `external` | `path` | Tools already installed externally (e.g. by IT). No files are copied. Deploy/upgrade blocked unless `--force`. |
 
-#### `disk` source layout
+#### `archive` source layout
 
-A `disk` source expects the tool's versions to already be arranged as semver subdirectories:
+An `archive` source expects the tool's versions to already be arranged as semver subdirectories containing archive files:
 
 ```
 /nfs/share/another-tool/
 ├── 2.0.0/
+│   └── another-tool-2.0.0.tar.gz
 ├── 3.0.0/
+│   └── another-tool-3.0.0.tar.gz
 └── 3.1.0/
+    └── another-tool-3.1.0.tar.gz
 ```
 
-`deploy.sh` will not copy or clone anything for disk sources — it only validates the version directory exists and writes the modulefile.
+Archive files (`.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tgz`, `.zip`) are extracted to `deploy_base_path/<tool>/<version>/` (or the custom `install_path`).
+
+#### `external` source layout
+
+An `external` source expects the tool's versions as semver subdirectories at the given path:
+
+```
+/opt/external/matlab/
+├── 2024.1.0/
+└── 2024.2.0/
+```
+
+No files are copied on deploy. The source type itself blocks deploy and upgrade unless `--force` is given. This replaces the old `"deploy": false` field.
 
 #### Toolsets
 
-A toolset is a named list of tool names. Use the `toolset` subcommand to write a combined modulefile that loads all tools in the set at their currently-recorded versions.
+Toolsets support two formats:
+
+**Legacy list format** — a list of tool names. Uses each tool's current `version` field:
+
+```json
+"toolsets": {
+  "science": ["tool-a", "tool-b"]
+}
+```
+
+**Dict format** — explicit version pins per tool, plus a toolset version. Required for `apply`:
+
+```json
+"toolsets": {
+  "science": {
+    "version": "1.0.0",
+    "tools": {
+      "tool-a": "1.2.0",
+      "tool-b": "2.0.0"
+    }
+  }
+}
+```
+
+Both formats work with `toolset`. The dict format is required for `apply`.
 
 ---
 
@@ -205,42 +304,47 @@ Changelog:
 
 ## Part 3 — Deploying Tools
 
-`deploy.sh` has four subcommands:
+`deploy.sh` has five subcommands:
 
 ```
 deploy.sh deploy  <tool> [--version X.Y.Z]   Deploy a tool version
 deploy.sh scan                                Check all tools for newer versions
 deploy.sh upgrade <tool>                      Deploy the latest available version
-deploy.sh toolset <name> --version X.Y.Z      Write a toolset modulefile
+deploy.sh toolset <name> [--version X.Y.Z]    Write a toolset modulefile (version from dict-format toolset if omitted)
+deploy.sh apply   [--toolset <name>]           Deploy all versions referenced by toolsets
 ```
 
 Global options available on all subcommands:
 
-```
---manifest FILE       Path to tools.json (default: TOOLS_MANIFEST or ./tools.json)
---config FILE         Path to .release.conf
---deploy-path PATH    Override DEPLOY_BASE_PATH
---mf-path PATH        Override MF_BASE_PATH
---dry-run             Show what would be done; make no changes
---non-interactive, -n Auto-confirm all prompts
---help, -h            Show help (works at top level and per subcommand)
-```
+| Option | Description |
+|---|---|
+| `--deploy-path PATH` | Deploy base path (overrides manifest `deploy_base_path`) |
+| `--manifest FILE` | Path to tools.json (default: `TOOLS_MANIFEST` or `./tools.json`) |
+| `--mf-path PATH` | Override modulefile directory |
+| `--config FILE` | Path to `.release.conf` |
+| `--dry-run` | Show what would be done; make no changes |
+| `--non-interactive`, `-n` | Auto-confirm all prompts |
+| `--force` | Override deploy protection for externally managed tools |
+| `--help`, `-h` | Show help (works at top level and per subcommand) |
 
 ### 3.1 deploy — Deploy a Specific Version
 
 ```bash
-deploy.sh deploy my-tool --version 1.3.0
+deploy.sh deploy my-tool --version 1.3.0 --deploy-path /opt/software
 ```
 
 What happens:
 
 1. Reads `tools.json` and finds the tool entry.
-2. Validates the requested version exists (for git sources, checks that the tag is published before attempting a clone).
-3. Asks for confirmation: `Deploy my-tool 1.3.0 (git) → /opt/software/my-tool/1.3.0?`
-4. Clones the tag (git) or validates the version directory (disk).
-5. Runs the bootstrap script if present (`install.sh` takes priority over `install.py`).
-6. Writes a modulefile.
-7. Updates `version` in `tools.json`.
+2. Resolves `deploy_base_path` from `--deploy-path` (CLI) or `deploy_base_path` (manifest).
+3. Checks if the tool is externally managed (source type `"external"`); if so, blocks unless `--force` is given.
+4. Validates the requested version exists (for git sources, checks that the tag is published before attempting a clone).
+5. Resolves `install_path` and `mf_path` — relative paths are joined with `deploy_base_path`.
+6. Asks for confirmation: `Deploy my-tool 1.3.0 (git) → /opt/software/my-tool/1.3.0?`
+7. Clones the tag (git), extracts archives (archive), or validates the version directory (external). For archive sources, extracts them to the deploy target.
+8. Runs the bootstrap command if configured.
+9. Writes a modulefile.
+10. Updates `version` in `tools.json`.
 
 If `--version` is omitted in non-interactive mode, the latest available version is selected automatically. In interactive mode, a numbered list is shown:
 
@@ -259,11 +363,10 @@ If `--version` is omitted in non-interactive mode, the latest available version 
 **Deploy directory layout (git source):**
 
 ```
-DEPLOY_BASE_PATH/
+deploy_base_path/
 ├── my-tool/
 │   ├── 1.2.0/               ← cloned tag (shallow, depth 1)
-│   │   ├── bin/
-│   │   └── install.sh       ← bootstrap ran here after clone
+│   │   └── ...
 │   └── 1.3.0/
 └── mf/
     └── my-tool/
@@ -271,7 +374,7 @@ DEPLOY_BASE_PATH/
         └── 1.3.0
 ```
 
-If `MF_BASE_PATH` is configured, modulefiles go there instead:
+If `MF_BASE_PATH` is configured or `--mf-path` is given, modulefiles go there instead:
 
 ```
 MF_BASE_PATH/
@@ -282,7 +385,7 @@ MF_BASE_PATH/
 
 ```bash
 # Examples
-deploy.sh deploy my-tool --version 1.3.0
+deploy.sh deploy my-tool --version 1.3.0 --deploy-path /opt/software
 deploy.sh deploy my-tool                         # interactive version picker
 deploy.sh deploy my-tool --version 1.3.0 -n      # non-interactive
 deploy.sh deploy my-tool --version 1.3.0 --dry-run
@@ -295,14 +398,17 @@ deploy.sh deploy my-tool --version 1.3.0 --mf-path /opt/modulefiles
 deploy.sh scan
 ```
 
-Checks every tool in `tools.json` against its source and prints an upgrade table:
+Checks every tool in `tools.json` against its source, writes all discovered versions into the `available` field of each tool in the manifest, and prints an upgrade table:
 
 ```
   my-tool        1.2.0   →  1.3.0  (minor)
   another-tool   3.0.0   →  3.1.0  (patch)
   stable-tool    2.0.0   (up to date)
+  matlab         2024.1  (up to date) (external)
   broken-tool    1.0.0   ⚠ error: Cannot list tags from git@...
 ```
+
+Externally managed tools (source type `"external"`) are marked with `(external)` and excluded from the interactive upgrade prompt.
 
 Bump labels: `patch`, `minor`, `major`, `up-to-date`, `ahead` (current newer than latest), `new` (never deployed), `unknown` (version unparseable).
 
@@ -320,6 +426,8 @@ Upgrades available:
 
 The planned upgrades are echoed and confirmed before any deploy runs. In **non-interactive mode** (`-n`), scan prints the table and exits without deploying.
 
+**Auto-discovery:** When archive or external sources are present, `scan` also checks sibling directories under their parent paths for tools not yet in the manifest and offers to add them.
+
 ```bash
 deploy.sh scan                   # interactive: prompts to upgrade
 deploy.sh scan -n                # non-interactive: report only
@@ -335,6 +443,8 @@ deploy.sh upgrade my-tool
 
 Looks up the latest available version for `my-tool`, compares it with the version recorded in `tools.json`, and deploys it if newer. If already at the latest version, exits successfully with no changes.
 
+Externally managed tools (source type `"external"`) are blocked unless `--force` is given.
+
 ```bash
 deploy.sh upgrade my-tool
 deploy.sh upgrade my-tool -n     # non-interactive
@@ -347,7 +457,9 @@ deploy.sh upgrade my-tool --dry-run
 deploy.sh toolset science --version 1.0.0
 ```
 
-Reads the `"science"` toolset from `tools.json`, collects the current deployed version of each tool in the set, generates a modulefile that loads all of them, and writes it to `MF_BASE_PATH/science/1.0.0` (or `DEPLOY_BASE_PATH/mf/science/1.0.0`).
+Reads the `"science"` toolset from `tools.json`, collects the current deployed version of each tool in the set, generates a modulefile that loads all of them, and writes it to `MF_BASE_PATH/science/1.0.0` (or `deploy_base_path/mf/science/1.0.0`).
+
+`--version` is optional for dict-format toolsets that include a `"version"` key — the toolset version is read from the manifest automatically.
 
 All tools in the toolset must have a version recorded in `tools.json`. If any are missing, the command lists them with suggested `deploy` commands and exits.
 
@@ -378,35 +490,79 @@ deploy.sh toolset science --version 1.0.0 --dry-run
 deploy.sh toolset science --version 1.0.0 -n
 ```
 
----
-
-## Part 4 — Bootstrap Scripts
-
-After cloning a git source, `deploy.sh` looks for a bootstrap script in the cloned directory root:
-
-1. `install.sh` — run via `bash` (takes priority)
-2. `install.py` — run via `python3`
-
-Only one runs. If bootstrap fails, you are prompted to either remove the cloned directory or leave it in place for inspection.
-
-Example `install.sh`:
+### 3.5 apply — Deploy All Toolset Versions
 
 ```bash
-#!/usr/bin/env bash
-set -e
-cd "$(dirname "$0")"
-pip install -r requirements.txt --prefix="$PREFIX"
+deploy.sh apply
+deploy.sh apply --toolset science
 ```
 
-Example `install.py`:
+Reads all dict-format toolsets from `tools.json`, collects every `(tool, version)` pair they reference, and deploys any that are not already present on disk. After deploying tools, writes toolset modulefiles for each processed toolset.
 
-```python
-import subprocess, pathlib
-root = pathlib.Path(__file__).parent
-subprocess.run(["make", "install", f"PREFIX={root}/install"], cwd=root, check=True)
+This is the "reconcile" step in a GitOps workflow:
+
+```bash
+# 1. Scan to populate available versions
+deploy.sh scan -n
+
+# 2. Edit tools.json — pick versions in toolsets
+#    (manually edit the toolsets dict)
+
+# 3. Apply — deploy everything that's missing
+deploy.sh apply
 ```
 
-Bootstrap scripts run with the cloned directory as their working directory. They are skipped for `disk` sources (the tool is already installed).
+Behavior:
+- **Already deployed**: If the deploy directory already exists on disk, the tool+version is skipped.
+- **Externally managed**: Tools with source type `"external"` are skipped with a warning (use `--force` to override).
+- **Error handling**: If one tool fails, the rest continue. A summary is printed at the end.
+- **Toolset modulefiles**: Written with `overwrite` — re-running apply updates them.
+- **Legacy toolsets**: Apply rejects list-format toolsets; only dict format with version pins is accepted.
+
+```bash
+deploy.sh apply                          # all toolsets
+deploy.sh apply --toolset science        # one toolset
+deploy.sh apply --dry-run                # preview only
+deploy.sh apply -n                       # non-interactive
+deploy.sh apply --force                  # include externally managed tools
+```
+
+---
+
+## Part 4 — Bootstrap Commands
+
+After cloning a git source or extracting archive source archives, `deploy.sh` runs the `bootstrap` command defined in the tool entry:
+
+```json
+{
+  "my-tool": {
+    "version": "",
+    "source": { "type": "git", "url": "..." },
+    "bootstrap": "bash install.sh"
+  }
+}
+```
+
+The command runs with the deploy directory as its working directory and has these environment variables available:
+
+| Variable | Value |
+|---|---|
+| `INSTALL_PATH` | Full path to the deploy directory |
+| `TOOL_VERSION` | Version being deployed |
+| `TOOL_NAME` | Tool name from the manifest |
+
+If bootstrap fails, you are prompted to either remove the deployed directory or leave it in place for inspection.
+
+Example bootstrap commands:
+
+```json
+"bootstrap": "bash install.sh"
+"bootstrap": "python3 install.py"
+"bootstrap": "pip install -r requirements.txt --prefix=$INSTALL_PATH"
+"bootstrap": "make install PREFIX=$INSTALL_PATH"
+```
+
+Bootstrap is skipped for external sources (the tool is already installed). It is also skipped in `--dry-run` mode (logged only).
 
 ---
 
@@ -478,14 +634,183 @@ MODULEFILE_TEMPLATE=/opt/templates/science.tcl
 
 ---
 
-## Part 6 — Complete Workflows
+## Part 6 — Externally Managed Tools
 
-### 6.1 First-time Setup
+Some tools are installed by an external IT department or package manager where you cannot (or should not) deploy normally. toolmanager supports tracking these tools in the manifest without accidentally deploying over them.
+
+### 6.1 Marking a Tool as External
+
+Use source type `"external"` on the tool entry:
+
+```json
+{
+  "deploy_base_path": "/opt/software",
+  "tools": {
+    "matlab": {
+      "version": "2024.1.0",
+      "source": {
+        "type": "external",
+        "path": "/opt/external/matlab"
+      }
+    }
+  }
+}
+```
+
+The source type alone controls deploy protection — no separate `"deploy": false` field is needed (that field has been removed).
+
+### 6.2 What Changes
+
+| Command | Behavior |
+|---|---|
+| `scan` | Shows the tool with an `(external)` marker. Excludes it from the upgrade prompt. |
+| `deploy` | Blocked with a clear error message. |
+| `upgrade` | Blocked with a clear error message. |
+| `toolset` | Works normally — can reference the tool's current version. |
+
+### 6.3 Deploying with --force
+
+When you need to deploy an external tool anyway — for instance into a container or an alternative path — use `--force`:
+
+```bash
+deploy.sh deploy matlab --version 2024.1.0 --force --deploy-path /local/export
+```
+
+### 6.4 Custom Install Path for External Tools
+
+Combine source type `"external"` with a relative `install_path` to control where forced deployments go:
+
+```json
+{
+  "deploy_base_path": "/",
+  "tools": {
+    "matlab": {
+      "version": "2024.1.0",
+      "source": {
+        "type": "external",
+        "path": "/opt/external/matlab"
+      },
+      "install_path": "opt/external/matlab/%version%"
+    }
+  }
+}
+```
+
+With `--deploy-path /local/export --force`, matlab deploys to `/local/export/opt/external/matlab/2024.1.0`.
+
+The `source.path` (where versions are scanned) and `deploy_base_path` (where deployments land) are completely independent. You can scan from IT's directory and deploy to your container mount.
+
+### 6.5 Updating the Version Manually
+
+When the external IT department deploys a new version, update `tools.json` by hand:
+
+```json
+"matlab": {
+  "version": "2024.2.0",
+  ...
+}
+```
+
+Or run `scan` to see that a new version is available, then update the version field manually.
+
+---
+
+## Part 7 — Archive Sources
+
+When an archive source version directory contains archive files, they are automatically extracted to the deploy target.
+
+### Supported Formats
+
+`.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tgz`, `.zip`
+
+### How It Works
+
+```
+/nfs/share/my-tool/
+├── 1.0.0/
+│   └── my-tool-1.0.0.tar.gz    ← archive detected
+└── 2.0.0/
+    └── my-tool-2.0.0.tar.gz
+```
+
+When deploying version `1.0.0`:
+
+1. Archives in `/nfs/share/my-tool/1.0.0/` are found.
+2. Extracted to a temporary directory.
+3. If `flatten_archive` is `true` (default) and extraction produced a single root directory, its contents are moved up one level.
+4. The result is moved to `deploy_base_path/my-tool/1.0.0/` (or `install_path`).
+
+### Controlling Flattening
+
+Some archives contain a single top-level directory (`my-tool-1.0.0/bin/...`). By default, this is flattened so the deploy directory contains `bin/...` directly. To disable:
+
+```json
+{
+  "my-tool": {
+    "flatten_archive": false,
+    "source": { "type": "archive", "path": "/nfs/share/my-tool" }
+  }
+}
+```
+
+### Security
+
+- Tar archives are extracted with Python's `data` filter (blocks symlink and device attacks).
+- Zip archives reject entries with path traversal (`../` or absolute paths).
+
+---
+
+## Part 8 — Path Resolution
+
+### deploy_base_path
+
+The deploy base path determines the root for all deployments and modulefiles. It is resolved in this order:
+
+| Priority | Source |
+|---|---|
+| 1 (lowest) | `deploy_base_path` in `tools.json` (default: `"/"`) |
+| 2 (highest) | `--deploy-path` CLI flag |
+
+### install_path and mf_path
+
+These per-tool fields support two forms:
+
+**Absolute paths** — used as-is:
+
+```json
+"install_path": "/opt/custom/my-tool/%version%"
+```
+
+**Relative paths** — joined with `deploy_base_path`:
+
+```json
+"install_path": "opt/custom/my-tool/%version%"
+```
+
+With `--deploy-path /local/export`, this resolves to `/local/export/opt/custom/my-tool/1.0.0`.
+
+If a relative path cannot resolve to an absolute path (e.g. `deploy_base_path` is empty), the command exits with a clear error.
+
+### Placeholders
+
+Both `install_path` and `mf_path` support:
+
+| Placeholder | Value |
+|---|---|
+| `%tool%` | Tool name |
+| `%version%` | Version being deployed |
+
+---
+
+## Part 9 — Complete Workflows
+
+### 9.1 First-time Setup
 
 ```bash
 # 1. Create tools.json
 cat > tools.json << 'EOF'
 {
+  "deploy_base_path": "/opt/software",
   "tools": {
     "my-tool": {
       "version": "",
@@ -500,13 +825,13 @@ cat > tools.json << 'EOF'
 EOF
 
 # 2. Scan to see what's available
-deploy.sh scan --manifest tools.json --deploy-path /opt/software
+deploy.sh scan --manifest tools.json
 
 # 3. Deploy the latest
-deploy.sh deploy my-tool --manifest tools.json --deploy-path /opt/software
+deploy.sh deploy my-tool --manifest tools.json
 ```
 
-### 6.2 Release + Deploy a Single Tool
+### 9.2 Release + Deploy a Single Tool
 
 ```bash
 # 1. Merge your work to main, then from the tool repo:
@@ -525,7 +850,7 @@ deploy.sh deploy my-tool --version 1.3.0
 module load my-tool/1.3.0
 ```
 
-### 6.3 Routine Upgrade Scan
+### 9.3 Routine Upgrade Scan
 
 ```bash
 # Check everything, then interactively choose what to upgrade
@@ -539,7 +864,7 @@ deploy.sh scan -n              # report only, or:
 deploy.sh upgrade my-tool -n
 ```
 
-### 6.4 Create a Toolset Modulefile
+### 9.4 Create a Toolset Modulefile
 
 A toolset modulefile loads a named collection of tools with a single `module load` command. The version you pass to `toolset` is the version of the *toolset itself* — it does not need to match any individual tool version.
 
@@ -549,6 +874,7 @@ Add a `"toolsets"` entry listing the tool names that belong to the set:
 
 ```json
 {
+  "deploy_base_path": "/opt/software",
   "tools": {
     "tool-a": {
       "version": "1.2.0",
@@ -556,7 +882,7 @@ Add a `"toolsets"` entry listing the tool names that belong to the set:
     },
     "tool-b": {
       "version": "2.0.0",
-      "source": { "type": "disk", "path": "/nfs/share/tool-b" }
+      "source": { "type": "archive", "path": "/nfs/share/tool-b" }
     }
   },
   "toolsets": {
@@ -586,7 +912,7 @@ After each deploy, `tools.json` is updated with the deployed version automatical
 deploy.sh toolset science --version 1.0.0
 ```
 
-The modulefile is written to `DEPLOY_BASE_PATH/mf/science/1.0.0` (or `MF_BASE_PATH/science/1.0.0` if set). Default output:
+The modulefile is written to `deploy_base_path/mf/science/1.0.0` (or `MF_BASE_PATH/science/1.0.0` if set). Default output:
 
 ```tcl
 #%Module1.0
@@ -684,7 +1010,20 @@ deploy.sh toolset science --version 1.0.0 -n
 deploy.sh toolset science --version 1.0.0 --manifest /etc/tools.json
 ```
 
-### 6.5 Redeploy an Older Version
+### 9.5 Deploy an External Tool into a Container
+
+```bash
+# tools.json has matlab with source type "external" and install_path: "opt/external/matlab/%version%"
+
+# Scan to see what versions IT has published
+deploy.sh scan
+
+# Deploy into the container's mount point
+deploy.sh deploy matlab --version 2024.1.0 --force --deploy-path /local/export
+# → installs to /local/export/opt/external/matlab/2024.1.0
+```
+
+### 9.6 Redeploy an Older Version
 
 ```bash
 # Deploy directories and modulefiles from older versions coexist
@@ -695,7 +1034,7 @@ module load my-tool/1.2.0
 
 Note: redeploying an older version updates `tools.json` to record it as the current version. Update it back manually or deploy the newer version again when ready.
 
-### 6.6 CI/CD Integration
+### 9.7 CI/CD Integration
 
 ```bash
 # Non-interactive release
@@ -711,7 +1050,7 @@ deploy.sh scan -n
 
 ---
 
-## Part 7 — Config Reference
+## Part 10 — Config Reference
 
 ### All Config Keys
 
@@ -720,7 +1059,6 @@ deploy.sh scan -n
 | `DEFAULT_BRANCH` | `RELEASE_DEFAULT_BRANCH` | `main` | Branch that releases are tagged from |
 | `TAG_PREFIX` | `RELEASE_TAG_PREFIX` | `v` | Prefix added to version tags (`v` → `v1.2.3`) |
 | `REMOTE` | `RELEASE_REMOTE` | `origin` | Git remote name |
-| `DEPLOY_BASE_PATH` | `DEPLOY_BASE_PATH` | *(none)* | Root directory for cloned releases and modulefiles |
 | `TOOLS_MANIFEST` | `TOOLS_MANIFEST` | `./tools.json` | Path to the tools.json manifest |
 | `MF_BASE_PATH` | `MF_BASE_PATH` | *(none)* | Override modulefile directory (e.g. separate NFS mount) |
 | `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template file |
@@ -737,9 +1075,6 @@ Environment variables are snapshotted at startup — config files cannot overrid
 # TAG_PREFIX=v
 # REMOTE=origin
 
-# Required for deploy.sh — must be an absolute path
-DEPLOY_BASE_PATH=/opt/software
-
 # Path to the tools.json manifest (default: ./tools.json)
 # TOOLS_MANIFEST=/etc/toolmanager/tools.json
 
@@ -752,7 +1087,7 @@ DEPLOY_BASE_PATH=/opt/software
 
 ---
 
-## Part 8 — Troubleshooting
+## Part 11 — Troubleshooting
 
 | Problem | Cause | Fix |
 |---|---|---|
@@ -760,13 +1095,16 @@ DEPLOY_BASE_PATH=/opt/software
 | `Working tree is dirty` | Uncommitted changes | `git stash` or commit |
 | `Not in sync with remote` | Local ahead or behind | `git pull` or `git push` |
 | `Tag 'v1.2.3' already exists` | Version already released | Choose a higher version |
-| `DEPLOY_BASE_PATH must be an absolute path` | Relative path passed | Use a full path: `/opt/software` |
-| `DEPLOY_BASE_PATH is not configured` | Path not set | Pass `--deploy-path`, set env var, or add to `.release.conf` |
+| `deploy_base_path must be an absolute path` | Relative path resolved | Use a full path in `tools.json` or `--deploy-path` |
+| `No deploy base path configured` | Neither manifest nor CLI set it | Add `deploy_base_path` to `tools.json` or pass `--deploy-path` |
+| `Tool 'x' is externally managed` | Source type is `"external"` | Use `--force` to override, or change the source type in `tools.json` |
+| `Resolved install_path is not absolute` | Relative `install_path` with empty `deploy_base_path` | Set `deploy_base_path` in `tools.json` or pass `--deploy-path` |
+| Tool deploys but should be blocked | Wrong source type | Change source type to `"external"` to block deploy/upgrade |
 | `Version 1.3.0 is not a published tag` | Tag not pushed yet | Run `release.sh` first, or `git push --tags` |
-| `Deploy directory already exists` | Already deployed this version | `rm -rf DEPLOY_BASE_PATH/tool/version` to reinstall |
-| `Modulefile already exists` | Already deployed this version | `rm MF_BASE_PATH/tool/version` to regenerate |
-| `Bootstrap failed` | `install.sh` or `install.py` exited non-zero | Check the script; prompted to clean up the clone |
-| `No versions available` | Source has no semver tags / disk path empty | Push a release tag, or check `source.path` |
+| `Deploy directory already exists` | Already deployed this version | `rm -rf deploy_base_path/tool/version` to reinstall |
+| `Modulefile already exists` | Already deployed this version | `rm mf_path/tool/version` to regenerate |
+| `Bootstrap failed` | Bootstrap command exited non-zero | Check the command; prompted to clean up the deploy |
+| `No versions available` | Source has no semver tags / source path empty | Push a release tag, or check `source.path` |
 | `tools.json not found` | Manifest path wrong | Pass `--manifest FILE` or set `TOOLS_MANIFEST` |
 | `Tool has no deployed version recorded` | `version` is empty in tools.json | Run `deploy.sh deploy <tool>` first |
 | Tool name contains `/` | Manifest has a path-traversal name | Fix the tool name in tools.json |

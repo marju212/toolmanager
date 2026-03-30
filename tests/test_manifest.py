@@ -16,6 +16,9 @@ from lib.manifest import (
     get_tool,
     set_tool_version,
     get_toolset,
+    get_toolset_tool_versions,
+    get_toolset_version,
+    set_tool_available,
     resolve_manifest_path,
 )
 
@@ -27,12 +30,37 @@ VALID_MANIFEST = {
         },
         "tool-b": {
             "version": "2.0.0",
-            "source": {"type": "disk", "path": "/opt/tool-b"},
+            "source": {"type": "external", "path": "/opt/tool-b"},
         },
     },
     "toolsets": {
         "science": ["tool-a", "tool-b"],
         "data": ["tool-b"],
+    },
+}
+
+VALID_MANIFEST_V2 = {
+    "tools": {
+        "tool-a": {
+            "version": "1.2.0",
+            "available": ["1.0.0", "1.2.0", "1.3.0"],
+            "source": {"type": "git", "url": "git@example.com:group/tool-a.git"},
+        },
+        "tool-b": {
+            "version": "2.0.0",
+            "available": ["1.0.0", "2.0.0"],
+            "source": {"type": "external", "path": "/opt/tool-b"},
+        },
+    },
+    "toolsets": {
+        "science": {
+            "version": "1.0.0",
+            "tools": {"tool-a": "1.2.0", "tool-b": "2.0.0"},
+        },
+        "data": {
+            "version": "3.0.0",
+            "tools": {"tool-b": "1.0.0"},
+        },
     },
 }
 
@@ -161,12 +189,12 @@ class TestLoadManifest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             load_manifest(path)
 
-    def test_disk_source_missing_path_exits(self):
+    def test_external_source_missing_path_exits(self):
         bad = {
             "tools": {
                 "tool-x": {
                     "version": "1.0.0",
-                    "source": {"type": "disk"},
+                    "source": {"type": "external"},
                 }
             },
             "toolsets": {},
@@ -257,6 +285,125 @@ class TestResolveManifestPath(unittest.TestCase):
         config = Config()
         expected = os.path.join(os.getcwd(), "tools.json")
         self.assertEqual(resolve_manifest_path(config), expected)
+
+
+class TestLoadManifestV2(unittest.TestCase):
+    """Tests for new dict-format toolsets and available field."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir)
+
+    def _write(self, data):
+        path = os.path.join(self.tmpdir, "tools.json")
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return path
+
+    def test_load_dict_toolset(self):
+        path = self._write(VALID_MANIFEST_V2)
+        data = load_manifest(path)
+        self.assertIn("science", data["toolsets"])
+        self.assertEqual(data["toolsets"]["science"]["version"], "1.0.0")
+        self.assertEqual(data["toolsets"]["science"]["tools"]["tool-a"], "1.2.0")
+
+    def test_load_mixed_formats(self):
+        """Manifest with both list and dict toolsets loads fine."""
+        mixed = copy.deepcopy(VALID_MANIFEST_V2)
+        mixed["toolsets"]["legacy"] = ["tool-a"]
+        path = self._write(mixed)
+        data = load_manifest(path)
+        self.assertIsInstance(data["toolsets"]["science"], dict)
+        self.assertIsInstance(data["toolsets"]["legacy"], list)
+
+    def test_dict_toolset_missing_tools_exits(self):
+        bad = copy.deepcopy(VALID_MANIFEST_V2)
+        bad["toolsets"]["science"] = {"version": "1.0.0"}
+        path = self._write(bad)
+        with self.assertRaises(SystemExit):
+            load_manifest(path)
+
+    def test_dict_toolset_missing_version_exits(self):
+        bad = copy.deepcopy(VALID_MANIFEST_V2)
+        bad["toolsets"]["science"] = {"tools": {"tool-a": "1.0.0"}}
+        path = self._write(bad)
+        with self.assertRaises(SystemExit):
+            load_manifest(path)
+
+    def test_available_field_valid(self):
+        path = self._write(VALID_MANIFEST_V2)
+        data = load_manifest(path)
+        self.assertEqual(data["tools"]["tool-a"]["available"],
+                         ["1.0.0", "1.2.0", "1.3.0"])
+
+    def test_available_field_non_list_exits(self):
+        bad = copy.deepcopy(VALID_MANIFEST_V2)
+        bad["tools"]["tool-a"]["available"] = "1.0.0"
+        path = self._write(bad)
+        with self.assertRaises(SystemExit):
+            load_manifest(path)
+
+    def test_available_field_non_string_items_exits(self):
+        bad = copy.deepcopy(VALID_MANIFEST_V2)
+        bad["tools"]["tool-a"]["available"] = [1, 2, 3]
+        path = self._write(bad)
+        with self.assertRaises(SystemExit):
+            load_manifest(path)
+
+    def test_dict_toolset_unknown_tool_warns(self):
+        data = copy.deepcopy(VALID_MANIFEST_V2)
+        data["toolsets"]["science"]["tools"]["nonexistent"] = "1.0.0"
+        path = self._write(data)
+        result = load_manifest(path)
+        self.assertIn("science", result["toolsets"])
+
+
+class TestGetToolsetToolVersions(unittest.TestCase):
+    def test_dict_format(self):
+        data = copy.deepcopy(VALID_MANIFEST_V2)
+        versions = get_toolset_tool_versions(data, "science")
+        self.assertEqual(versions, {"tool-a": "1.2.0", "tool-b": "2.0.0"})
+
+    def test_legacy_list_format(self):
+        data = copy.deepcopy(VALID_MANIFEST)
+        versions = get_toolset_tool_versions(data, "science")
+        self.assertEqual(versions, {"tool-a": "1.2.0", "tool-b": "2.0.0"})
+
+    def test_legacy_list_missing_version(self):
+        data = copy.deepcopy(VALID_MANIFEST)
+        del data["tools"]["tool-a"]["version"]
+        versions = get_toolset_tool_versions(data, "science")
+        self.assertEqual(versions, {"tool-a": "", "tool-b": "2.0.0"})
+
+    def test_unknown_toolset_exits(self):
+        data = copy.deepcopy(VALID_MANIFEST)
+        with self.assertRaises(SystemExit):
+            get_toolset_tool_versions(data, "nonexistent")
+
+
+class TestGetToolsetVersion(unittest.TestCase):
+    def test_dict_format(self):
+        data = copy.deepcopy(VALID_MANIFEST_V2)
+        self.assertEqual(get_toolset_version(data, "science"), "1.0.0")
+
+    def test_legacy_list_format_returns_empty(self):
+        data = copy.deepcopy(VALID_MANIFEST)
+        self.assertEqual(get_toolset_version(data, "science"), "")
+
+
+class TestSetToolAvailable(unittest.TestCase):
+    def test_set_available(self):
+        data = copy.deepcopy(VALID_MANIFEST)
+        set_tool_available(data, "tool-a", ["1.0.0", "1.2.0", "2.0.0"])
+        self.assertEqual(data["tools"]["tool-a"]["available"],
+                         ["1.0.0", "1.2.0", "2.0.0"])
+
+    def test_set_available_overwrites(self):
+        data = copy.deepcopy(VALID_MANIFEST_V2)
+        set_tool_available(data, "tool-a", ["3.0.0"])
+        self.assertEqual(data["tools"]["tool-a"]["available"], ["3.0.0"])
 
 
 if __name__ == "__main__":

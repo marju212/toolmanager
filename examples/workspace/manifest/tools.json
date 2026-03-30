@@ -1,0 +1,49 @@
+{
+  "deploy_base_path": "__WORKSPACE__/deploy",
+  "tools": {
+    "hello-cli": {
+      "version": "1.0.0",
+      "available": ["1.0.0", "1.1.0", "2.0.0"],
+      "source": {
+        "type": "git",
+        "url": "__WORKSPACE__/repos/hello-cli.git"
+      },
+      "bootstrap": "./install.sh"
+    },
+    "calculator": {
+      "version": "1.0.0",
+      "available": ["1.0.0", "1.0.1", "1.1.0"],
+      "source": {
+        "type": "git",
+        "url": "__WORKSPACE__/repos/calculator.git"
+      }
+    },
+    "text-tools": {
+      "version": "1.0.0",
+      "available": ["1.0.0", "1.1.0"],
+      "source": {
+        "type": "archive",
+        "path": "__WORKSPACE__/archives/text-tools"
+      }
+    },
+    "json-viewer": {
+      "version": "1.0.0",
+      "available": ["1.0.0", "2.0.0"],
+      "source": {
+        "type": "external",
+        "path": "__WORKSPACE__/external/json-viewer"
+      }
+    }
+  },
+  "toolsets": {
+    "demo-suite": {
+      "version": "1.0.0",
+      "tools": {
+        "hello-cli": "1.0.0",
+        "calculator": "1.0.0",
+        "text-tools": "1.0.0",
+        "json-viewer": "1.0.0"
+      }
+    }
+  }
+}

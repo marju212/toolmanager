@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# hello-cli: A friendly greeting tool
+VERSION="2.0.0"
+NAME=""
+GREETING="Hello"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --name)     NAME="$2"; shift 2 ;;
+        --greeting) GREETING="$2"; shift 2 ;;
+        --version)  echo "hello-cli $VERSION"; exit 0 ;;
+        --help)     echo "Usage: hello [--name NAME] [--greeting GREETING] [--version]"; exit 0 ;;
+        *)          echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [[ -n "$NAME" ]]; then
+    echo "$GREETING, $NAME!"
+else
+    echo "$GREETING, World!"
+fi

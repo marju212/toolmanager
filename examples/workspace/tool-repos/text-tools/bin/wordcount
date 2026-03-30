@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# wordcount: Count words in stdin or file
+VERSION="1.0.0"
+
+if [[ "${1:-}" == "--version" ]]; then
+    echo "text-tools/wordcount $VERSION"
+    exit 0
+fi
+
+if [[ -n "${1:-}" && -f "$1" ]]; then
+    wc -w < "$1"
+else
+    wc -w
+fi

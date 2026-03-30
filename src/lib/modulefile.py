@@ -1,4 +1,20 @@
-"""Modulefile generation and template substitution."""
+"""Modulefile generation and template substitution for Environment Modules.
+
+Generates Tcl modulefiles that let users load tools via 'module load tool/version'.
+Supports two kinds of modulefiles:
+
+    Tool modulefiles    — one per tool+version, sets PATH etc.
+    Toolset modulefiles — loads multiple tools at pinned versions.
+
+Template resolution priority (for tool modulefiles):
+    1. Copy previous version's modulefile and update version references
+    2. Use modulefile.tcl from the deployed repo (git sources)
+    3. Use config-specified MODULEFILE_TEMPLATE
+    4. Fall back to built-in default template
+
+Placeholders in templates: %VERSION%, %ROOT%, %TOOL_NAME%, %DEPLOY_BASE_PATH%
+Toolset templates also support: %TOOL_LOADS%, %<tool-name>% (per-tool version)
+"""
 
 import os
 import re
@@ -217,26 +233,47 @@ def generate_toolset_modulefile(
     )
 
 
-def write_modulefile(content: str, mf_path: str, dry_run: bool = False) -> None:
+def write_modulefile(
+    content: str, mf_path: str, dry_run: bool = False, overwrite: bool = False,
+) -> None:
     """Write modulefile content to disk.
 
     Args:
         content: Modulefile content string.
         mf_path: Target file path.
         dry_run: If True, log but don't write.
+        overwrite: If True, replace an existing file instead of erroring.
     """
     if dry_run:
         log_info(f"[dry-run] Would write modulefile to {mf_path}")
         return
 
+    # Refuse to follow symlinks to prevent writing outside expected tree
+    if os.path.islink(mf_path):
+        log_error(f"Modulefile path is a symlink: {mf_path} — refusing to write.")
+        raise SystemExit(1)
+    mf_dir = os.path.dirname(mf_path)
+    if os.path.islink(mf_dir):
+        log_error(f"Modulefile directory is a symlink: {mf_dir} — refusing to write.")
+        raise SystemExit(1)
+
+    existed = os.path.isfile(mf_path)
+    if existed and not overwrite:
+        log_error(f"Modulefile already exists: {mf_path}")
+        log_error(f"  To replace it, remove it first: rm {mf_path}")
+        raise SystemExit(1)
+
     try:
-        os.makedirs(os.path.dirname(mf_path), exist_ok=True)
+        os.makedirs(mf_dir, exist_ok=True)
         with open(mf_path, "w") as f:
             f.write(content)
     except OSError as e:
         log_error(f"Cannot write modulefile to '{mf_path}': {e}")
         raise SystemExit(1)
-    log_success(f"Modulefile written to {mf_path}")
+    if existed:
+        log_warn(f"Modulefile overwritten: {mf_path}")
+    else:
+        log_success(f"Modulefile written to {mf_path}")
 
 
 def copy_and_update_modulefile(
@@ -274,8 +311,17 @@ def copy_and_update_modulefile(
         content,
     )
 
+    # Refuse to follow symlinks
+    if os.path.islink(dest_path):
+        log_error(f"Modulefile path is a symlink: {dest_path} — refusing to write.")
+        raise SystemExit(1)
+    dest_dir = os.path.dirname(dest_path)
+    if os.path.islink(dest_dir):
+        log_error(f"Modulefile directory is a symlink: {dest_dir} — refusing to write.")
+        raise SystemExit(1)
+
     try:
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        os.makedirs(dest_dir, exist_ok=True)
         with open(dest_path, "w") as f:
             f.write(content)
     except OSError as e:

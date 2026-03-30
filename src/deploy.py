@@ -1,10 +1,42 @@
 #!/usr/bin/env python3
-"""Deploy tool: subcommand-driven deploy via tools.json manifest."""
+"""Deploy tool: manifest-driven tool deployment with Environment Modules support.
 
+Subcommands:
+
+    deploy <tool> [--version X.Y.Z]
+        Deploy a single tool version. Clones (git), extracts (archive), or
+        references in place (external). Runs bootstrap if configured, writes
+        a modulefile, and updates tools.json.
+
+    scan
+        Query all sources for available versions, write them to the manifest's
+        'available' field, and print an upgrade table. Interactive mode offers
+        to upgrade selected tools.
+
+    upgrade <tool>
+        Shortcut: deploy the latest available version of a tool.
+
+    toolset <name> [--version X.Y.Z]
+        Write a combined modulefile that loads all tools in a named toolset.
+        Supports both legacy list format and dict format with version pins.
+
+    apply [--toolset <name>]
+        Declarative deploy: read dict-format toolsets, deploy every tool+version
+        pair not already on disk, and write toolset modulefiles. This is the
+        "reconcile" step in a GitOps workflow.
+
+Source adapters (see lib/sources.py) handle the actual version discovery
+and deployment for each source type (git, archive, external).
+"""
+
+import fcntl
 import os
+import re
+import signal
 import shutil
 import subprocess
 import sys
+import time
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
@@ -15,7 +47,8 @@ from lib.config import load_config
 from lib.semver import validate_semver
 from lib.manifest import (
     load_manifest, save_manifest, get_tool, set_tool_version,
-    get_toolset, resolve_manifest_path,
+    get_toolset, get_toolset_tool_versions, get_toolset_version,
+    set_tool_available, resolve_manifest_path,
 )
 from lib.sources import build_adapter, SourceError
 from lib.modulefile import (
@@ -33,7 +66,8 @@ Subcommands:
   deploy  <tool> [--version X.Y.Z]    Deploy a tool; update tools.json
   scan                                 Check all tools for newer versions
   upgrade <tool>                       Deploy latest version; update tools.json
-  toolset <name> --version X.Y.Z       Write modulefile for a named toolset
+  toolset <name> [--version X.Y.Z]    Write modulefile for a named toolset
+  apply   [--toolset <name>]           Deploy all versions referenced by toolsets
 
 Global options:
   --manifest FILE        Path to tools.json manifest
@@ -42,6 +76,7 @@ Global options:
   --mf-path PATH         Modulefile base path override
   --dry-run              Show what would be done, no changes
   --non-interactive, -n  Auto-confirm all prompts
+  --force                Override deploy protection for external source tools
   --help, -h             Show this help
 """
 
@@ -71,55 +106,196 @@ Usage: deploy.py toolset <name> --version X.Y.Z [OPTIONS]
 Write a modulefile for a named toolset using current tool versions from tools.json.
 """
 
+USAGE_APPLY = """\
+Usage: deploy.py apply [--toolset <name>] [OPTIONS]
 
-def run_bootstrap(deploy_dir: str, dry_run: bool = False) -> bool:
-    """Run bootstrap script (install.sh or install.py) if present.
+Deploy all tool versions referenced by toolsets that are not yet installed.
+Reads version pins from dict-format toolsets in tools.json, checks which
+versions are already on disk, and deploys the missing ones.
 
-    Returns True if bootstrap ran successfully or was skipped.
+Options:
+  --toolset <name>       Apply only this toolset (default: all)
+"""
+
+
+def _resolve_path_template(template: str, tool_name: str, version: str) -> str:
+    """Resolve %tool% and %version% placeholders in a path template."""
+    return template.replace("%tool%", tool_name).replace("%version%", version)
+
+
+def _check_no_symlink(path: str, label: str) -> None:
+    """Abort if *path* or any ancestor inside the deploy tree is a symlink."""
+    p = path
+    while p and p != "/":
+        if os.path.islink(p):
+            log_error(
+                f"{label} path contains a symlink: {p}  "
+                f"— refusing to continue."
+            )
+            raise SystemExit(1)
+        p = os.path.dirname(p)
+
+
+def _is_inside(path: str, base: str) -> bool:
+    """Return True if *path* resolves to a location inside *base*."""
+    real_path = os.path.realpath(path)
+    real_base = os.path.realpath(base)
+    return real_path.startswith(real_base + os.sep) or real_path == real_base
+
+
+def _safe_cleanup(
+    deploy_root: str,
+    source_version_dir: str,
+    deploy_base_path: str,
+    reason: str,
+    dry_run: bool,
+    non_interactive: bool,
+) -> None:
+    """Remove a deploy directory only if it is safe to do so.
+
+    Refuses to remove the source version directory itself or any path
+    that resolves outside deploy_base_path.
+    """
+    if dry_run or not os.path.isdir(deploy_root):
+        return
+    if deploy_root == source_version_dir:
+        return
+    if not _is_inside(deploy_root, deploy_base_path):
+        log_warn(
+            f"Refusing to remove {deploy_root}: "
+            f"resolves outside deploy base path ({deploy_base_path})"
+        )
+        return
+    if confirm(
+        f"Remove deploy directory due to {reason}: {deploy_root}?",
+        dry_run=dry_run,
+        non_interactive=non_interactive,
+    ):
+        shutil.rmtree(deploy_root, ignore_errors=True)
+    else:
+        log_warn(f"Deploy directory left in place: {deploy_root}")
+
+
+_LOCK_STALE_SECONDS = 3600  # 1 hour
+
+
+# Global state for signal-handler cleanup
+_active_lock_fd = None
+_active_lock_path = None
+
+
+def _lock_signal_handler(signum, frame):
+    """Clean up lock file on SIGTERM/SIGINT before exiting."""
+    _release_deploy_lock_if_active()
+    sys.exit(128 + signum)
+
+
+def _release_deploy_lock_if_active():
+    """Release global lock if one is held (for signal handler use)."""
+    global _active_lock_fd, _active_lock_path
+    if _active_lock_fd is not None:
+        _release_deploy_lock(_active_lock_fd, _active_lock_path)
+        _active_lock_fd = None
+        _active_lock_path = None
+
+
+def _acquire_deploy_lock(tool_name: str, base_path: str) -> int:
+    """Acquire an advisory file lock for deploying a tool.
+
+    Returns (file_descriptor, lock_path).  Warns if the lock file
+    appears stale (mtime older than _LOCK_STALE_SECONDS).
+    """
+    global _active_lock_fd, _active_lock_path
+    lock_dir = os.path.join(base_path, tool_name)
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, ".deploy.lock")
+
+    # Warn about possibly stale lock before blocking
+    if os.path.exists(lock_path):
+        try:
+            age = time.time() - os.path.getmtime(lock_path)
+            if age > _LOCK_STALE_SECONDS:
+                log_warn(
+                    f"Lock file is {int(age // 3600)}h old and may be stale: "
+                    f"{lock_path}  — remove manually if no deploy is running."
+                )
+        except OSError:
+            pass
+
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        log_error(
+            f"Another deploy of {tool_name} may be in progress "
+            f"(lock: {lock_path})"
+        )
+        raise SystemExit(1)
+
+    # Update mtime so staleness detection works for the next caller
+    try:
+        os.utime(lock_path)
+    except OSError:
+        pass
+
+    # Register for signal-based cleanup
+    _active_lock_fd = fd
+    _active_lock_path = lock_path
+    signal.signal(signal.SIGTERM, _lock_signal_handler)
+    signal.signal(signal.SIGINT, _lock_signal_handler)
+
+    return fd, lock_path
+
+
+def _release_deploy_lock(fd: int, lock_path: str) -> None:
+    """Release an advisory deploy lock and remove the lock file."""
+    global _active_lock_fd, _active_lock_path
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+    try:
+        os.unlink(lock_path)
+    except OSError:
+        pass
+    _active_lock_fd = None
+    _active_lock_path = None
+
+
+def run_bootstrap(
+    command: str,
+    deploy_dir: str,
+    version: str,
+    tool_name: str,
+    dry_run: bool = False,
+) -> bool:
+    """Run an explicit bootstrap command in the deploy directory.
+
+    Returns True if bootstrap ran successfully.
     Returns False if bootstrap failed.
     """
-    install_sh = os.path.join(deploy_dir, "install.sh")
-    install_py = os.path.join(deploy_dir, "install.py")
-
-    bootstrap_script = None
-    if os.path.isfile(install_sh):
-        bootstrap_script = install_sh
-    elif os.path.isfile(install_py):
-        bootstrap_script = install_py
-
-    if bootstrap_script is None:
+    if not command:
         return True
 
     if dry_run:
-        log_info(f"[dry-run] Would run bootstrap: {bootstrap_script}")
+        log_info(f"[dry-run] Would run bootstrap: {command}")
         return True
 
-    log_info(f"Running bootstrap: {os.path.basename(bootstrap_script)}")
+    log_info(f"Running bootstrap: {command}")
+    env = os.environ.copy()
+    env["INSTALL_PATH"] = deploy_dir
+    env["TOOL_VERSION"] = version
+    env["TOOL_NAME"] = tool_name
 
-    os.chmod(bootstrap_script, 0o755)
     try:
-        if bootstrap_script.endswith(".py"):
-            subprocess.run(
-                [sys.executable, bootstrap_script],
-                cwd=deploy_dir, check=True,
-            )
-        else:
-            subprocess.run(
-                ["bash", bootstrap_script],
-                cwd=deploy_dir, check=True,
-            )
-        log_success(f"Bootstrap completed: {os.path.basename(bootstrap_script)}")
+        subprocess.run(
+            command, shell=True, cwd=deploy_dir, check=True, env=env,
+        )
+        log_success(f"Bootstrap completed: {command}")
         return True
     except subprocess.CalledProcessError as e:
-        log_error(
-            f"Bootstrap failed: {os.path.basename(bootstrap_script)} "
-            f"(exit code {e.returncode})"
-        )
-        log_error(
-            f"  To investigate, run it manually: "
-            f"{'python3' if bootstrap_script.endswith('.py') else 'bash'} "
-            f"{bootstrap_script}"
-        )
+        log_error(f"Bootstrap failed: {command} (exit code {e.returncode})")
         return False
 
 
@@ -129,19 +305,24 @@ def _write_tool_modulefile(
     deploy_root: str,
     config,
     dry_run: bool,
+    install_path: str | None = None,
+    mf_path: str | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Write modulefile for a single deployed tool."""
-    mf_base = config.mf_base_path or os.path.join(config.deploy_base_path, "mf")
-    mf_dir = os.path.join(mf_base, tool_name)
-    mf_file = os.path.join(mf_dir, version)
+    if mf_path:
+        mf_file = mf_path
+        mf_dir = os.path.dirname(mf_file)
+    else:
+        mf_base = config.mf_base_path or os.path.join(config.deploy_base_path, "mf")
+        mf_dir = os.path.join(mf_base, tool_name)
+        mf_file = os.path.join(mf_dir, version)
 
-    if os.path.isfile(mf_file):
-        log_error(f"Modulefile already exists: {mf_file}")
-        log_error(f"  To replace it, remove it first: rm {mf_file}")
-        raise SystemExit(1)
+    # Use install_path as root for modulefile placeholders if provided
+    root = install_path or deploy_root
 
     latest_mf = find_latest_modulefile(mf_dir)
-    if latest_mf and os.path.isfile(latest_mf):
+    if latest_mf and os.path.isfile(latest_mf) and not overwrite:
         prev_version = os.path.basename(latest_mf)
         copy_and_update_modulefile(
             latest_mf, mf_file, prev_version, version, dry_run
@@ -155,14 +336,14 @@ def _write_tool_modulefile(
             content = substitute_placeholders(
                 template_content,
                 version=version,
-                root=deploy_root,
+                root=root,
                 tool_name=tool_name,
                 deploy_base_path=config.deploy_base_path,
             )
-            write_modulefile(content, mf_file, dry_run)
+            write_modulefile(content, mf_file, dry_run, overwrite=overwrite)
         else:
-            content = generate_default_modulefile(tool_name, version, deploy_root)
-            write_modulefile(content, mf_file, dry_run)
+            content = generate_default_modulefile(tool_name, version, root)
+            write_modulefile(content, mf_file, dry_run, overwrite=overwrite)
 
 
 def _prompt_version_interactive(
@@ -238,6 +419,14 @@ def _prompt_version_interactive(
         return raw
 
 
+def _apply_manifest_deploy_base(config, data: dict) -> None:
+    """Fall back to manifest deploy_base_path when CLI did not set one."""
+    if not config.deploy_base_path:
+        manifest_path = data.get("deploy_base_path", "")
+        if manifest_path:
+            config.deploy_base_path = manifest_path
+
+
 def cmd_deploy(
     tool_name: str,
     version_arg: str,
@@ -248,18 +437,25 @@ def cmd_deploy(
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
     tool_entry = get_tool(data, tool_name)
+    _apply_manifest_deploy_base(config, data)
+
+    if tool_entry["source"]["type"] == "external" and not args["force"]:
+        log_error(
+            f"Tool '{tool_name}' is externally managed (source type: external). "
+            f"Use --force to deploy anyway."
+        )
+        raise SystemExit(1)
 
     if not config.deploy_base_path:
         log_error(
-            "DEPLOY_BASE_PATH is not configured. "
-            "Set it via --deploy-path, the DEPLOY_BASE_PATH env var, "
-            "or DEPLOY_BASE_PATH=/opt/tools in ~/.release.conf."
+            "No deploy base path configured. "
+            "Set 'deploy_base_path' in tools.json or pass --deploy-path."
         )
         raise SystemExit(1)
 
     if not os.path.isabs(config.deploy_base_path):
         log_error(
-            f"DEPLOY_BASE_PATH must be an absolute path: {config.deploy_base_path}"
+            f"deploy_base_path must be an absolute path: {config.deploy_base_path}"
         )
         raise SystemExit(1)
 
@@ -317,20 +513,60 @@ def cmd_deploy(
                 tool_name, current_version, available
             )
 
-    # --------------------------------------------------- pre-deploy checks
-    if source_type == "git":
-        deploy_root_expected = os.path.join(
-            config.deploy_base_path, tool_name, version
+    # ------------------------------------------------- resolve custom paths
+    raw_install_path = tool_entry.get("install_path")
+    if raw_install_path:
+        resolved_install_path = _resolve_path_template(
+            raw_install_path, tool_name, version
         )
-        if os.path.isdir(deploy_root_expected):
-            log_error(
-                f"Deploy directory already exists: {deploy_root_expected}"
+        if not os.path.isabs(resolved_install_path):
+            resolved_install_path = os.path.join(
+                config.deploy_base_path, resolved_install_path
             )
+        if not os.path.isabs(resolved_install_path):
             log_error(
-                f"  To reinstall, remove it first: rm -rf {deploy_root_expected}"
+                f"Resolved install_path is not absolute: {resolved_install_path}. "
+                f"Provide --deploy-path or set deploy_base_path in tools.json."
             )
             raise SystemExit(1)
-        dest_label = deploy_root_expected
+    else:
+        resolved_install_path = None
+
+    raw_mf_path = tool_entry.get("mf_path")
+    if raw_mf_path:
+        resolved_mf_path = _resolve_path_template(
+            raw_mf_path, tool_name, version
+        )
+        if not os.path.isabs(resolved_mf_path):
+            resolved_mf_path = os.path.join(
+                config.deploy_base_path, resolved_mf_path
+            )
+        if not os.path.isabs(resolved_mf_path):
+            log_error(
+                f"Resolved mf_path is not absolute: {resolved_mf_path}. "
+                f"Provide --deploy-path or set deploy_base_path in tools.json."
+            )
+            raise SystemExit(1)
+    else:
+        resolved_mf_path = None
+
+    flatten_archive = tool_entry.get("flatten_archive", True)
+
+    # --------------------------------------------------- pre-deploy checks
+    if resolved_install_path:
+        deploy_target = resolved_install_path
+    elif source_type == "external":
+        # External: no new directory created — tool is already in place
+        deploy_target = None
+    elif source_type in ("git", "archive"):
+        deploy_target = os.path.join(
+            config.deploy_base_path, tool_name, version
+        )
+    else:
+        deploy_target = None
+
+    if deploy_target:
+        dest_label = deploy_target
     else:
         dest_label = os.path.join(tool_entry["source"]["path"], version)
 
@@ -342,52 +578,112 @@ def cmd_deploy(
         log_warn("Deploy cancelled.")
         return
 
-    # ------------------------------------------------------------- deploy
+    lock_fd = None
+    lock_path = None
+    if not dry_run and config.deploy_base_path:
+        lock_fd, lock_path = _acquire_deploy_lock(tool_name, config.deploy_base_path)
     try:
-        deploy_root = adapter.deploy(
-            version, config.deploy_base_path, tool_name, dry_run
-        )
-    except SourceError as e:
-        log_error(str(e))
-        raise SystemExit(1)
-
-    # --------------------------------------------------------- bootstrap
-    if source_type == "git" and not dry_run and os.path.isdir(deploy_root):
-        if not run_bootstrap(deploy_root, dry_run):
-            if confirm(
-                f"Remove clone directory due to failed bootstrap: {deploy_root}?",
-                dry_run=dry_run,
-                non_interactive=non_interactive,
-            ):
-                shutil.rmtree(deploy_root, ignore_errors=True)
+        # Re-check directory existence *inside* the lock to avoid TOCTOU
+        if deploy_target and not dry_run:
+            if os.path.islink(deploy_target):
+                log_error(
+                    f"Deploy target is a symlink: {deploy_target}  "
+                    f"— refusing to continue."
+                )
+                raise SystemExit(1)
+            if os.path.isdir(deploy_target):
+                log_error(f"Deploy directory already exists: {deploy_target}")
+                log_error(
+                    f"  To reinstall, remove it first: rm -rf {deploy_target}"
+                )
+                raise SystemExit(1)
+        # ------------------------------------------------------------- deploy
+        try:
+            if source_type == "archive":
+                deploy_root = adapter.deploy(
+                    version, config.deploy_base_path, tool_name, dry_run,
+                    install_path=resolved_install_path,
+                    flatten_archive=flatten_archive,
+                )
             else:
-                log_warn(f"Clone directory left in place: {deploy_root}")
+                deploy_root = adapter.deploy(
+                    version, config.deploy_base_path, tool_name, dry_run,
+                    install_path=resolved_install_path,
+                )
+        except SourceError as e:
+            log_error(str(e))
             raise SystemExit(1)
-    elif source_type == "git" and dry_run:
-        run_bootstrap(deploy_root, dry_run=True)
 
-    # ------------------------------------------------------ modulefile
-    try:
-        _write_tool_modulefile(tool_name, version, deploy_root, config, dry_run)
-    except SystemExit:
-        if source_type == "git" and not dry_run and os.path.isdir(deploy_root):
-            if confirm(
-                f"Remove clone directory due to failed deploy: {deploy_root}?",
-                dry_run=dry_run,
-                non_interactive=non_interactive,
-            ):
-                shutil.rmtree(deploy_root, ignore_errors=True)
-            else:
-                log_warn(f"Clone directory left in place: {deploy_root}")
-        raise
+        # --------------------------------------------------------- bootstrap
+        # Guard: never offer to remove the external source version dir itself
+        source_version_dir = os.path.join(
+            tool_entry.get("source", {}).get("path", ""), version
+        )
+        bootstrap_cmd = tool_entry.get("bootstrap", "")
+        if bootstrap_cmd and not dry_run and os.path.isdir(deploy_root):
+            if not run_bootstrap(bootstrap_cmd, deploy_root, version, tool_name, dry_run):
+                _safe_cleanup(deploy_root, source_version_dir,
+                              config.deploy_base_path, "failed bootstrap",
+                              dry_run, non_interactive)
+                raise SystemExit(1)
+        elif bootstrap_cmd and dry_run:
+            run_bootstrap(bootstrap_cmd, deploy_root, version, tool_name, dry_run=True)
 
-    # -------------------------------------------------- update manifest
-    if not dry_run:
-        set_tool_version(data, tool_name, version)
-        save_manifest(manifest_path, data)
-        log_success(f"Updated {tool_name} version to {version} in manifest")
+        # ------------------------------------------------------ modulefile
+        try:
+            _write_tool_modulefile(
+                tool_name, version, deploy_root, config, dry_run,
+                install_path=resolved_install_path,
+                mf_path=resolved_mf_path,
+            )
+        except SystemExit:
+            _safe_cleanup(deploy_root, source_version_dir,
+                          config.deploy_base_path, "failed deploy",
+                          dry_run, non_interactive)
+            raise
 
-    log_success(f"Deployed {tool_name} {version}")
+        # -------------------------------------------------- update manifest
+        if not dry_run:
+            set_tool_version(data, tool_name, version)
+            save_manifest(manifest_path, data)
+            log_success(f"Updated {tool_name} version to {version} in manifest")
+
+        log_success(f"Deployed {tool_name} {version}")
+
+        # ------------------------------------------------ toolset update hint
+        toolsets = data.get("toolsets", {})
+        matching_toolsets = [
+            ts_name for ts_name, ts_tools in toolsets.items()
+            if tool_name in ts_tools
+        ]
+        if matching_toolsets:
+            ts_list = ", ".join(matching_toolsets)
+            log_info(
+                f"Tool {tool_name} is in toolset(s): {ts_list}. "
+                f"Toolset modulefiles may need updating."
+            )
+            if not non_interactive:
+                for ts_name in matching_toolsets:
+                    if confirm(
+                        f"Update toolset '{ts_name}' modulefile?",
+                        dry_run=dry_run,
+                        non_interactive=non_interactive,
+                    ):
+                        try:
+                            ts_version = input(
+                                f"  Enter version for toolset '{ts_name}': "
+                            ).strip()
+                        except (EOFError, KeyboardInterrupt):
+                            print("", file=sys.stderr)
+                            continue
+                        if ts_version:
+                            try:
+                                cmd_toolset(ts_name, ts_version, args, config)
+                            except SystemExit:
+                                log_warn(f"Toolset '{ts_name}' update failed — continuing.")
+    finally:
+        if lock_fd is not None:
+            _release_deploy_lock(lock_fd, lock_path)
 
 
 def _compare_versions(current: str, available: list) -> tuple:
@@ -428,6 +724,7 @@ def cmd_scan(args: dict, config) -> None:
     """Scan subcommand: check all tools for newer versions."""
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
     tools = data.get("tools", {})
 
     if not tools:
@@ -435,37 +732,127 @@ def cmd_scan(args: dict, config) -> None:
         return
 
     # Collect rows — note errors as strings so they appear in the table
-    rows = []  # (name, current, latest, bump, error_detail)
+    rows = []  # (name, current, latest, bump, error_detail, external)
     for name in sorted(tools.keys()):
         tool_entry = tools[name]
         current = tool_entry.get("version", "")
+        external = tool_entry["source"]["type"] == "external"
         adapter = build_adapter(tool_entry, tag_prefix=config.tag_prefix)
         try:
             available = adapter.get_available_versions()
         except SourceError as e:
-            rows.append((name, current, "?", "error", str(e)))
+            rows.append((name, current, "?", "error", str(e), external))
             continue
+        tool_entry["available"] = available
         latest, bump = _compare_versions(current, available)
-        rows.append((name, current, latest, bump, ""))
+        rows.append((name, current, latest, bump, "", external))
 
     # ----------------------------------------------------------------- table
     # Printed to stdout so it can be piped / grepped.
     print("")
     w_name = max(len(r[0]) for r in rows)
     w_ver  = max(len(r[1]) if r[1] else len("(none)") for r in rows)
-    for name, current, latest, bump, err in rows:
+    for name, current, latest, bump, err, external in rows:
         cur_label = current if current else "(none)"
+        ext_tag = " (external)" if external else ""
         pad_name  = f"{name:<{w_name}}"
         pad_cur   = f"{cur_label:<{w_ver}}"
         if bump == "up-to-date":
-            print(f"  {pad_name}  {pad_cur}  (up to date)")
+            print(f"  {pad_name}  {pad_cur}  (up to date){ext_tag}")
         elif bump == "ahead":
-            print(f"  {pad_name}  {pad_cur}  (ahead of latest: {latest})")
+            print(f"  {pad_name}  {pad_cur}  (ahead of latest: {latest}){ext_tag}")
         elif bump == "error":
             print(f"  {pad_name}  {pad_cur}  \u26a0 error: {err}")
         else:
-            print(f"  {pad_name}  {pad_cur}  \u2192  {latest}  ({bump})")
+            print(f"  {pad_name}  {pad_cur}  \u2192  {latest}  ({bump}){ext_tag}")
     print("")
+
+    # ----------------------------------------------------- auto-discovery
+    # Collect unique source parent directories for auto-discovery
+    disk_parents = set()
+    manifest_tools = set(tools.keys())
+    for tname, tentry in tools.items():
+        src_type = tentry.get("source", {}).get("type", "")
+        if src_type in ("archive", "external"):
+            disk_parents.add(tentry["source"]["path"])
+
+    if disk_parents:
+        discovered = []  # (name, path, versions)
+        parent_dirs = set()
+        for dp in disk_parents:
+            parent = os.path.dirname(dp)
+            if parent and os.path.isdir(parent):
+                parent_dirs.add(parent)
+
+        semver_re = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+        for parent in sorted(parent_dirs):
+            try:
+                entries = os.listdir(parent)
+            except OSError:
+                continue
+            for entry in entries:
+                candidate_path = os.path.join(parent, entry)
+                if not os.path.isdir(candidate_path):
+                    continue
+                if entry in manifest_tools:
+                    continue
+                # Check for tools already tracked by a different name
+                # (their source path matches this candidate)
+                already_tracked = any(
+                    t.get("source", {}).get("path") == candidate_path
+                    for t in tools.values()
+                )
+                if already_tracked:
+                    continue
+                # Check if candidate has semver subdirs
+                try:
+                    sub_entries = os.listdir(candidate_path)
+                except OSError:
+                    continue
+                versions = [
+                    s for s in sub_entries
+                    if semver_re.match(s) and os.path.isdir(
+                        os.path.join(candidate_path, s)
+                    )
+                ]
+                if versions:
+                    versions.sort(
+                        key=lambda v: tuple(int(x) for x in v.split("."))
+                    )
+                    discovered.append((entry, candidate_path, versions))
+
+        if discovered:
+            print("  Discovered (not in manifest):", file=sys.stderr)
+            for dname, dpath, dversions in discovered:
+                dlatest = dversions[-1]
+                print(
+                    f"    {dname:<{w_name}}  {dpath}  "
+                    f"(versions: {len(dversions)}, latest: {dlatest})",
+                    file=sys.stderr,
+                )
+            print("", file=sys.stderr)
+
+            if not args["non_interactive"]:
+                if confirm(
+                    "Add discovered tools to manifest?",
+                    dry_run=args["dry_run"],
+                    non_interactive=args["non_interactive"],
+                ):
+                    for dname, dpath, dversions in discovered:
+                        data["tools"][dname] = {
+                            "version": "",
+                            "available": dversions,
+                            "source": {"type": "external", "path": dpath},
+                        }
+                    if not args["dry_run"]:
+                        save_manifest(manifest_path, data)
+                        log_success(
+                            f"Added {len(discovered)} tool(s) to manifest"
+                        )
+
+    # Persist available versions discovered during scan
+    if not args["dry_run"]:
+        save_manifest(manifest_path, data)
 
     if args["non_interactive"]:
         return
@@ -473,8 +860,9 @@ def cmd_scan(args: dict, config) -> None:
     # -------------------------------------------------------- upgrade prompt
     upgradable = [
         (name, current, latest)
-        for name, current, latest, bump, _ in rows
+        for name, current, latest, bump, _, external in rows
         if bump not in ("up-to-date", "ahead", "error", "unknown")
+        and not external
     ]
     if not upgradable:
         log_info("All tools are up to date.")
@@ -555,7 +943,15 @@ def cmd_upgrade(tool_name: str, args: dict, config) -> None:
     """Upgrade subcommand: deploy the latest available version."""
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
     tool_entry = get_tool(data, tool_name)
+
+    if tool_entry["source"]["type"] == "external" and not args["force"]:
+        log_error(
+            f"Tool '{tool_name}' is externally managed (source type: external). "
+            f"Use --force to upgrade anyway."
+        )
+        raise SystemExit(1)
 
     adapter = build_adapter(tool_entry, tag_prefix=config.tag_prefix)
     try:
@@ -581,40 +977,35 @@ def cmd_upgrade(tool_name: str, args: dict, config) -> None:
 
 def cmd_toolset(name: str, version: str, args: dict, config) -> None:
     """Toolset subcommand: write modulefile for a named toolset."""
-    if not version:
-        log_error("--version is required for the toolset subcommand")
-        raise SystemExit(1)
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
 
-    try:
-        validate_semver(version)
-    except ValueError:
-        log_error(f"Invalid version: '{version}' (expected X.Y.Z)")
+    # Resolve version: CLI --version takes precedence, then manifest dict
+    ts_version = get_toolset_version(data, name)
+    if version:
+        try:
+            validate_semver(version)
+        except ValueError:
+            log_error(f"Invalid version: '{version}' (expected X.Y.Z)")
+            raise SystemExit(1)
+    elif ts_version:
+        version = ts_version
+    else:
+        log_error("--version is required for the toolset subcommand")
         raise SystemExit(1)
 
     deploy_base_path = config.deploy_base_path or ""
     if not config.mf_base_path and not deploy_base_path:
         log_error(
-            "Either --mf-path or --deploy-path (or DEPLOY_BASE_PATH) must be "
-            "set to determine where to write the toolset modulefile."
+            "Either --mf-path or --deploy-path must be set, "
+            "or set deploy_base_path in tools.json."
         )
         raise SystemExit(1)
 
-    manifest_path = resolve_manifest_path(config)
-    data = load_manifest(manifest_path)
-    ts_tools = get_toolset(data, name)
-
-    # Build tool_versions dict; warn loudly about missing or empty versions
-    tool_versions = {}
-    missing_versions = []
-    for tool_name in ts_tools:
-        if tool_name not in data["tools"]:
-            log_warn(f"Toolset tool '{tool_name}' not found in manifest — skipping")
-            continue
-        ver = data["tools"][tool_name].get("version", "")
-        if not ver:
-            missing_versions.append(tool_name)
-        else:
-            tool_versions[tool_name] = ver
+    # Build tool_versions dict from toolset (handles both list and dict format)
+    tool_versions = get_toolset_tool_versions(data, name)
+    missing_versions = [t for t, v in tool_versions.items() if not v]
 
     if missing_versions:
         log_error(
@@ -638,14 +1029,239 @@ def cmd_toolset(name: str, version: str, args: dict, config) -> None:
     mf_file = os.path.join(mf_base, name, version)
 
     dry_run = args["dry_run"]
-    if not dry_run and os.path.isfile(mf_file):
-        log_error(f"Toolset modulefile already exists: {mf_file}")
-        log_error(f"  To replace it, remove it first: rm {mf_file}")
+    write_modulefile(content, mf_file, dry_run)
+
+
+def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
+    """Apply subcommand: deploy all tool versions referenced by toolsets."""
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
+
+    dry_run = args["dry_run"]
+    force = args["force"]
+
+    if not config.deploy_base_path:
+        log_error(
+            "No deploy base path configured. "
+            "Set 'deploy_base_path' in tools.json or pass --deploy-path."
+        )
         raise SystemExit(1)
 
-    write_modulefile(content, mf_file, dry_run)
-    if not dry_run:
-        log_success(f"Toolset modulefile written: {mf_file}")
+    if not os.path.isabs(config.deploy_base_path):
+        log_error(
+            f"deploy_base_path must be an absolute path: {config.deploy_base_path}"
+        )
+        raise SystemExit(1)
+
+    toolsets = data.get("toolsets", {})
+    if toolset_filter:
+        if toolset_filter not in toolsets:
+            log_error(
+                f"Toolset '{toolset_filter}' not found in manifest. "
+                f"Available: {', '.join(sorted(toolsets.keys())) or '(none)'}"
+            )
+            raise SystemExit(1)
+        selected_toolsets = {toolset_filter: toolsets[toolset_filter]}
+    else:
+        selected_toolsets = toolsets
+
+    if not selected_toolsets:
+        log_info("No toolsets in manifest.")
+        return
+
+    # Validate all selected toolsets use dict format and collect required versions
+    required = {}  # (tool_name, version) -> set of toolset names
+    for ts_name, ts_entry in selected_toolsets.items():
+        if not isinstance(ts_entry, dict):
+            log_error(
+                f"Toolset '{ts_name}' uses legacy list format. "
+                f"Apply requires dict format with version pins."
+            )
+            raise SystemExit(1)
+        tool_versions = get_toolset_tool_versions(data, ts_name)
+        for tool_name, version in tool_versions.items():
+            if not version:
+                log_error(
+                    f"Toolset '{ts_name}' has empty version for tool '{tool_name}'"
+                )
+                raise SystemExit(1)
+            key = (tool_name, version)
+            required.setdefault(key, set()).add(ts_name)
+
+    if not required:
+        log_info("No tool versions to deploy.")
+        return
+
+    # Deploy missing tool+version pairs
+    deployed_count = 0
+    skipped_count = 0
+    errors = []
+
+    for (tool_name, version), ts_names in sorted(required.items()):
+        tool_entry = data["tools"].get(tool_name)
+        if not tool_entry:
+            errors.append((tool_name, version, f"not found in manifest"))
+            continue
+
+        if tool_entry["source"]["type"] == "external" and not force:
+            log_warn(
+                f"Skipping {tool_name} {version} — externally managed "
+                f"(use --force to override)"
+            )
+            skipped_count += 1
+            continue
+
+        # Resolve install path
+        raw_install_path = tool_entry.get("install_path")
+        if raw_install_path:
+            deploy_target = _resolve_path_template(
+                raw_install_path, tool_name, version
+            )
+            if not os.path.isabs(deploy_target):
+                deploy_target = os.path.join(
+                    config.deploy_base_path, deploy_target
+                )
+        else:
+            deploy_target = os.path.join(
+                config.deploy_base_path, tool_name, version
+            )
+
+        # External sources: the version dir IS the deploy location
+        source_type = tool_entry["source"]["type"]
+        if source_type == "external" and not raw_install_path:
+            deploy_target = os.path.join(
+                tool_entry["source"]["path"], version
+            )
+
+        # Quick pre-lock check (authoritative check is inside the lock)
+        if os.path.isdir(deploy_target) and not os.path.islink(deploy_target):
+            log_info(f"Already deployed: {tool_name} {version}")
+            skipped_count += 1
+            continue
+
+        # Deploy
+        adapter = build_adapter(tool_entry, tag_prefix=config.tag_prefix)
+        flatten_archive = tool_entry.get("flatten_archive", True)
+
+        lock_fd = None
+        lock_path = None
+        if not dry_run:
+            lock_fd, lock_path = _acquire_deploy_lock(
+                tool_name, config.deploy_base_path
+            )
+        try:
+            # Re-check inside lock to avoid TOCTOU
+            if not dry_run:
+                if os.path.islink(deploy_target):
+                    log_error(
+                        f"Deploy target is a symlink: {deploy_target}  "
+                        f"— refusing to continue."
+                    )
+                    errors.append((tool_name, version, "symlink detected"))
+                    continue
+                if os.path.isdir(deploy_target):
+                    log_info(f"Already deployed: {tool_name} {version}")
+                    skipped_count += 1
+                    continue
+
+            log_info(f"Deploying {tool_name} {version} → {deploy_target}")
+            try:
+                if source_type == "archive":
+                    deploy_root = adapter.deploy(
+                        version, config.deploy_base_path, tool_name, dry_run,
+                        install_path=raw_install_path and deploy_target or None,
+                        flatten_archive=flatten_archive,
+                    )
+                else:
+                    deploy_root = adapter.deploy(
+                        version, config.deploy_base_path, tool_name, dry_run,
+                        install_path=raw_install_path and deploy_target or None,
+                    )
+            except SourceError as e:
+                errors.append((tool_name, version, str(e)))
+                continue
+
+            # Bootstrap
+            bootstrap_cmd = tool_entry.get("bootstrap", "")
+            if bootstrap_cmd and not dry_run and os.path.isdir(deploy_root):
+                if not run_bootstrap(
+                    bootstrap_cmd, deploy_root, version, tool_name, dry_run
+                ):
+                    errors.append((tool_name, version, "bootstrap failed"))
+                    continue
+            elif bootstrap_cmd and dry_run:
+                run_bootstrap(
+                    bootstrap_cmd, deploy_root, version, tool_name, dry_run=True
+                )
+
+            # Modulefile for tool
+            raw_mf_path = tool_entry.get("mf_path")
+            resolved_mf_path = None
+            if raw_mf_path:
+                resolved_mf_path = _resolve_path_template(
+                    raw_mf_path, tool_name, version
+                )
+                if not os.path.isabs(resolved_mf_path):
+                    resolved_mf_path = os.path.join(
+                        config.deploy_base_path, resolved_mf_path
+                    )
+            resolved_install_path = (
+                deploy_target if raw_install_path else None
+            )
+
+            try:
+                _write_tool_modulefile(
+                    tool_name, version, deploy_root, config, dry_run,
+                    install_path=resolved_install_path,
+                    mf_path=resolved_mf_path,
+                    overwrite=True,
+                )
+            except SystemExit:
+                errors.append((tool_name, version, "modulefile write failed"))
+                continue
+
+            deployed_count += 1
+
+        finally:
+            if lock_fd is not None:
+                _release_deploy_lock(lock_fd, lock_path)
+
+    # Write toolset modulefiles
+    for ts_name, ts_entry in selected_toolsets.items():
+        ts_version = get_toolset_version(data, ts_name)
+        if not ts_version:
+            log_warn(f"Toolset '{ts_name}' has no version — skipping modulefile")
+            continue
+
+        tool_versions = get_toolset_tool_versions(data, ts_name)
+        content = generate_toolset_modulefile(
+            toolset_name=ts_name,
+            version=ts_version,
+            deploy_base_path=config.deploy_base_path or "",
+            tool_versions=tool_versions,
+        )
+
+        mf_base = config.mf_base_path or os.path.join(
+            config.deploy_base_path, "mf"
+        )
+        mf_file = os.path.join(mf_base, ts_name, ts_version)
+        write_modulefile(content, mf_file, dry_run, overwrite=True)
+        if not dry_run:
+            log_success(f"Toolset modulefile written: {mf_file}")
+
+    # Summary
+    if errors:
+        log_warn(f"Apply finished with {len(errors)} error(s):")
+        for tname, tver, reason in errors:
+            log_error(f"  {tname} {tver}: {reason}")
+    if deployed_count or skipped_count:
+        log_info(
+            f"Deployed: {deployed_count}, skipped: {skipped_count}, "
+            f"errors: {len(errors)}"
+        )
+    if not errors:
+        log_success("Apply completed successfully.")
 
 
 def parse_global_args(argv: list) -> tuple:
@@ -661,6 +1277,7 @@ def parse_global_args(argv: list) -> tuple:
         "cli_deploy_path": "",
         "cli_mf_path": "",
         "non_interactive": False,
+        "force": False,
     }
 
     remaining = []
@@ -695,6 +1312,8 @@ def parse_global_args(argv: list) -> tuple:
             global_args["cli_mf_path"] = argv[i]
         elif arg in ("--non-interactive", "-n"):
             global_args["non_interactive"] = True
+        elif arg == "--force":
+            global_args["force"] = True
         else:
             remaining.append(arg)
         i += 1
@@ -839,6 +1458,30 @@ def main(argv: list = None) -> None:
             print(USAGE_TOOLSET)
             raise SystemExit(1)
         cmd_toolset(ts_name, version_arg, args, config)
+
+    # ------------------------------------------------------------------ apply
+    elif subcommand == "apply":
+        if "--help" in sub_remaining or "-h" in sub_remaining:
+            print(USAGE_APPLY)
+            raise SystemExit(0)
+        toolset_filter = ""
+        rest = []
+        i = 0
+        while i < len(sub_remaining):
+            if sub_remaining[i] == "--toolset":
+                i += 1
+                if i >= len(sub_remaining):
+                    log_error("--toolset requires a name")
+                    raise SystemExit(1)
+                toolset_filter = sub_remaining[i]
+            else:
+                rest.append(sub_remaining[i])
+            i += 1
+        if rest:
+            log_error(f"Unexpected argument(s): {' '.join(rest)}")
+            print(USAGE_APPLY)
+            raise SystemExit(1)
+        cmd_apply(args, config, toolset_filter=toolset_filter)
 
     else:
         log_error(f"Unknown subcommand: {subcommand}")

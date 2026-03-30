@@ -46,6 +46,8 @@ Test files: `test_config`, `test_semver`, `test_git`, `test_modulefile`, `test_m
 ./scripts/deploy.sh scan                                     # check all tools for updates
 ./scripts/deploy.sh upgrade my-tool                          # deploy latest version
 ./scripts/deploy.sh toolset science --version 1.0.0          # write toolset modulefile
+./scripts/deploy.sh apply                                    # deploy all versions referenced by toolsets
+./scripts/deploy.sh apply --toolset science                  # deploy only one toolset
 ```
 
 ## Architecture
@@ -62,10 +64,10 @@ src/
 │   ├── semver.py              # Semver validation and version suggestion
 │   ├── modulefile.py          # Modulefile generation + template substitution
 │   ├── manifest.py            # tools.json read/write and validation
-│   ├── sources.py             # GitAdapter and DiskAdapter (SourceError exception)
+│   ├── sources.py             # GitAdapter, ArchiveAdapter, ExternalAdapter (SourceError exception)
 │   └── prompt.py              # Interactive prompts (confirm, version picker)
 ├── release.py                 # Release tool: annotated tag from main + changelog
-└── deploy.py                  # Deploy tool: subcommand-driven (deploy/scan/upgrade/toolset)
+└── deploy.py                  # Deploy tool: subcommand-driven (deploy/scan/upgrade/toolset/apply)
 
 scripts/
 ├── release.sh                 # Thin wrapper: exec python3 src/release.py "$@"
@@ -78,12 +80,15 @@ scripts/
 - Every write operation respects `dry_run` — full validation runs without side effects
 - Environment variables are snapshotted at import time so config files cannot override them
 - Release flow tags from main only — no release branches, no hotfix MRs, no GitLab API calls
-- `deploy.sh` is subcommand-driven: `deploy`, `scan`, `upgrade`, `toolset`
-- Source adapters (`GitAdapter`, `DiskAdapter`) raise `SourceError` on failure; callers log and exit
+- `deploy.sh` is subcommand-driven: `deploy`, `scan`, `upgrade`, `toolset`, `apply`
+- Source adapters (`GitAdapter`, `ArchiveAdapter`, `ExternalAdapter`) raise `SourceError` on failure; callers log and exit
 - Bootstrap support: `install.sh` (priority) or `install.py` in tool repos (git source only)
 - Modulefile template chain: previous version copy > repo `modulefile.tcl` > config template > default
 - Toolset modulefiles support per-tool version placeholders (`%tool-name%`, `%TOOL_LOADS%`)
 - `tools.json` manifest: `version` field updated automatically on deploy; source config maintained manually
+- `scan` writes an `available` list per tool with all discoverable versions
+- Toolsets support two formats: legacy list `["tool1"]` and dict `{"version": "X.Y.Z", "tools": {"tool1": "1.0.0"}}`
+- `apply` deploys all tool+version pairs referenced by dict-format toolsets that are not yet on disk
 
 ### Test Infrastructure
 

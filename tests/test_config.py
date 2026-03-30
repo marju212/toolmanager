@@ -59,7 +59,6 @@ class TestParseConfFile(unittest.TestCase):
 DEFAULT_BRANCH=develop
 TAG_PREFIX=release-
 REMOTE=upstream
-DEPLOY_BASE_PATH=/opt/tools
 MODULEFILE_TEMPLATE=/opt/templates/tool.tcl
 MF_BASE_PATH=/opt/modulefiles
 TOOLS_MANIFEST=/etc/tools.json
@@ -69,7 +68,6 @@ TOOLS_MANIFEST=/etc/tools.json
         self.assertEqual(result["DEFAULT_BRANCH"], "develop")
         self.assertEqual(result["TAG_PREFIX"], "release-")
         self.assertEqual(result["REMOTE"], "upstream")
-        self.assertEqual(result["DEPLOY_BASE_PATH"], "/opt/tools")
         self.assertEqual(result["MODULEFILE_TEMPLATE"], "/opt/templates/tool.tcl")
         self.assertEqual(result["MF_BASE_PATH"], "/opt/modulefiles")
         self.assertEqual(result["TOOLS_MANIFEST"], "/etc/tools.json")
@@ -79,9 +77,9 @@ TOOLS_MANIFEST=/etc/tools.json
         self.assertEqual(result, {})
 
     def test_value_with_equals(self):
-        path = self._write_conf("DEPLOY_BASE_PATH=/opt/foo=bar\n")
+        path = self._write_conf("MF_BASE_PATH=/opt/foo=bar\n")
         result = _parse_conf_file(path)
-        self.assertEqual(result["DEPLOY_BASE_PATH"], "/opt/foo=bar")
+        self.assertEqual(result["MF_BASE_PATH"], "/opt/foo=bar")
 
     def test_removed_update_default_branch_is_unknown(self):
         """UPDATE_DEFAULT_BRANCH was removed; it must not be silently applied."""
@@ -130,8 +128,7 @@ class TestLoadConfig(unittest.TestCase):
         config = load_config(config_file=path)
         self.assertEqual(config.default_branch, "production")
 
-    def test_cli_deploy_path_overrides_all(self):
-        _ENV_SNAPSHOT["DEPLOY_BASE_PATH"] = "/env/path"
+    def test_cli_deploy_path_sets_deploy_base(self):
         config = load_config(cli_deploy_path="/cli/path")
         self.assertEqual(config.deploy_base_path, "/cli/path")
 
@@ -176,6 +173,7 @@ class TestLoadConfig(unittest.TestCase):
         _ENV_SNAPSHOT["MF_BASE_PATH"] = "/env/modulefiles"
         config = load_config(cli_mf_path="/cli/modulefiles")
         self.assertEqual(config.mf_base_path, "/cli/modulefiles")
+
 
 
 if __name__ == "__main__":

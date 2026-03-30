@@ -1,14 +1,12 @@
 # .release.conf — Configuration for release.sh and deploy.sh
 #
-# Place this file in your repository root as .release.conf or in your
-# home directory as ~/.release.conf. Values can also be set via
-# environment variables (which take highest priority).
+# Place this file in your repository root as .release.conf.
+# Values can also be set via environment variables (which take highest priority).
 #
 # Config priority (later wins):
-#   1. ~/.release.conf        (user-level)
-#   2. <repo>/.release.conf   (repo-level)
-#   3. --config FILE           (explicit flag)
-#   4. Environment variables   (highest priority)
+#   1. <repo>/.release.conf   (repo-level)
+#   2. --config FILE           (explicit flag)
+#   3. Environment variables   (highest priority)
 
 # Branch to release from. Default: main
 # Env var: RELEASE_DEFAULT_BRANCH
@@ -22,13 +20,6 @@
 # Env var: RELEASE_REMOTE
 # REMOTE=origin
 
-# Base path where tool versions are cloned and modulefiles are written.
-# The deploy step clones into DEPLOY_BASE_PATH/<tool>/<version> and writes
-# a modulefile to DEPLOY_BASE_PATH/mf/<tool>/<version> (unless MF_BASE_PATH
-# is set). Must be an absolute path. Required by deploy.sh.
-# Env var: DEPLOY_BASE_PATH
-# DEPLOY_BASE_PATH=/opt/software
-
 # Path to the tools.json manifest. Defaults to tools.json in the working
 # directory if unset. Set this if your manifest lives elsewhere.
 # Env var: TOOLS_MANIFEST
@@ -41,7 +32,7 @@
 # MODULEFILE_TEMPLATE=/opt/templates/my-tool.tcl
 
 # Override the base directory for modulefiles.
-# If unset, modulefiles are written to DEPLOY_BASE_PATH/mf/<tool>/<version>.
+# If unset, modulefiles are written to deploy_base_path/mf/<tool>/<version>.
 # If set, modulefiles are written to MF_BASE_PATH/<tool>/<version>.
 # Useful when modulefiles live on a separate mount (e.g. a shared NFS path).
 # Env var: MF_BASE_PATH

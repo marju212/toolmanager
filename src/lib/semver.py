@@ -1,7 +1,6 @@
 """Semantic versioning validation, suggestion, and comparison."""
 
 import re
-from typing import Optional
 
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 

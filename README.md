@@ -31,10 +31,17 @@ chmod +x /opt/toolmanager/scripts/*.sh
 
 ### Initial Configuration
 
-```bash
-cp /opt/toolmanager/scripts/.release.conf.example .release.conf
-# edit .release.conf and set DEPLOY_BASE_PATH at minimum
+Create a `tools.json` manifest:
+
+```json
+{
+  "deploy_base_path": "/opt/software",
+  "tools": {},
+  "toolsets": {}
+}
 ```
+
+`deploy_base_path` sets the default root directory for deployments. It can always be overridden with `--deploy-path` on the command line.
 
 ---
 
@@ -91,12 +98,12 @@ deploy.sh <subcommand> [OPTIONS]
 #### `deploy` — Deploy a specific version
 
 ```bash
-deploy.sh deploy my-tool --version 1.3.0
+deploy.sh deploy my-tool --version 1.3.0 --deploy-path /opt/software
 deploy.sh deploy my-tool                     # interactive version picker
 deploy.sh deploy my-tool --version 1.3.0 -n  # non-interactive
 ```
 
-Clones the tag (git source) or validates the version directory (disk source), runs the bootstrap script if present, writes a modulefile, and updates `tools.json`.
+Clones the tag (git source) or validates the version directory (disk source), runs the bootstrap command if configured, writes a modulefile, and updates `tools.json`.
 
 #### `scan` — Check all tools for updates
 
@@ -110,9 +117,10 @@ Prints an upgrade table for every tool in the manifest:
 ```
   my-tool      1.2.0   →  1.3.0  (minor)
   stable-tool  2.0.0   (up to date)
+  matlab       2024.1  (up to date) (external)
 ```
 
-In interactive mode, prompts which tools to upgrade after the report.
+Externally managed tools (source type `"external"`) are shown with an `(external)` marker and excluded from the upgrade prompt.
 
 #### `upgrade` — Deploy the latest available version
 
@@ -135,18 +143,20 @@ Reads the named toolset from `tools.json`, collects current deployed versions of
 
 | Option | Description |
 |---|---|
+| `--deploy-path PATH` | Deploy base path (overrides manifest `deploy_base_path`) |
 | `--manifest FILE` | Path to tools.json |
-| `--deploy-path PATH` | Override DEPLOY_BASE_PATH |
-| `--mf-path PATH` | Override MF_BASE_PATH (modulefile directory) |
+| `--mf-path PATH` | Override modulefile directory |
+| `--config FILE` | Load configuration from FILE |
 | `--dry-run` | Show what would be done; make no changes |
 | `--non-interactive`, `-n` | Auto-confirm all prompts |
-| `--config FILE` | Load configuration from FILE |
+| `--force` | Override deploy protection for externally managed tools |
 | `--help`, `-h` | Show help (also works per subcommand) |
 
 ### tools.json Schema
 
 ```json
 {
+  "deploy_base_path": "/opt/software",
   "tools": {
     "my-tool": {
       "version": "1.2.0",
@@ -155,26 +165,58 @@ Reads the named toolset from `tools.json`, collects current deployed versions of
         "url": "git@gitlab.com:group/my-tool.git"
       }
     },
-    "disk-tool": {
+    "packaged-tool": {
       "version": "3.0.0",
       "source": {
-        "type": "disk",
-        "path": "/nfs/share/disk-tool"
+        "type": "archive",
+        "path": "/nfs/share/packaged-tool"
+      }
+    },
+    "matlab": {
+      "version": "2024.1.0",
+      "source": {
+        "type": "external",
+        "path": "/opt/external/matlab"
       }
     }
   },
   "toolsets": {
-    "science": ["my-tool", "disk-tool"]
+    "science": {
+      "version": "1.0.0",
+      "tools": {
+        "my-tool": "1.2.0",
+        "packaged-tool": "3.0.0",
+        "matlab": "2024.1.0"
+      }
+    }
   }
 }
 ```
 
-Source types: `git` (requires `url`), `disk` (requires `path`). Only the `version` field is written by the tool; everything else is maintained by hand.
+#### Top-level fields
+
+| Field | Default | Description |
+|---|---|---|
+| `deploy_base_path` | `"/"` | Default root for deployments; overridden by `--deploy-path` |
+| `tools` | `{}` | Tool definitions |
+| `toolsets` | `{}` | Named lists of tools for combined modulefiles |
+
+#### Per-tool fields
+
+| Field | Required | Description |
+|---|---|---|
+| `source` | Yes | Source config: `{"type": "git", "url": "..."}`, `{"type": "archive", "path": "..."}`, or `{"type": "external", "path": "..."}` |
+| `version` | No | Current deployed version (updated automatically on deploy) |
+| `available` | No | List of available versions (populated by `scan`) |
+| `install_path` | No | Custom deploy path; relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` |
+| `mf_path` | No | Custom modulefile path; relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` |
+| `bootstrap` | No | Shell command to run after deploy |
+| `flatten_archive` | No | For archive sources: flatten single-root directories after extraction (default: `true`) |
 
 ### Deploy Directory Structure
 
 ```
-DEPLOY_BASE_PATH/
+deploy_base_path/
 ├── my-tool/
 │   ├── 1.2.0/           # cloned tag (git source)
 │   └── 1.3.0/
@@ -197,12 +239,9 @@ Config files use `KEY=VALUE` format with `#` comments and optional quotes.
 | `DEFAULT_BRANCH` | `RELEASE_DEFAULT_BRANCH` | `main` | Branch to release from |
 | `TAG_PREFIX` | `RELEASE_TAG_PREFIX` | `v` | Tag prefix (e.g. `v` → `v1.2.3`) |
 | `REMOTE` | `RELEASE_REMOTE` | `origin` | Git remote name |
-| `DEPLOY_BASE_PATH` | `DEPLOY_BASE_PATH` | *(none)* | Root for cloned releases and modulefiles |
 | `TOOLS_MANIFEST` | `TOOLS_MANIFEST` | `./tools.json` | Path to the tools.json manifest |
 | `MF_BASE_PATH` | `MF_BASE_PATH` | *(none)* | Override modulefile directory |
 | `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template |
-
-Environment variables take highest priority and are snapshotted at startup.
 
 ---
 
@@ -217,7 +256,7 @@ src/
 │   ├── semver.py              # Semver validation + suggestions
 │   ├── modulefile.py          # Modulefile generation + templates
 │   ├── manifest.py            # tools.json read/write/validation
-│   ├── sources.py             # GitAdapter + DiskAdapter
+│   ├── sources.py             # GitAdapter, ArchiveAdapter, ExternalAdapter
 │   └── prompt.py              # Interactive prompts
 ├── release.py                 # Release tool
 └── deploy.py                  # Deploy tool (subcommand-driven)
@@ -232,6 +271,8 @@ scripts/
 
 ## Running Tests
 
+No external dependencies — tests use the Python standard library only.
+
 ```bash
 # Run all tests
 python3 -m unittest discover tests/ -p "test_*.py"
@@ -241,7 +282,50 @@ python3 -m unittest discover tests/ -p "test_*.py" -v
 
 # Single file
 python3 -m unittest tests/test_deploy.py
+
+# Single test case
+python3 -m unittest tests.test_semver.TestValidateSemver.test_valid_versions
 ```
+
+Requirements: Python 3.12+, Git, Bash. No `pip install` needed.
+
+---
+
+## Example Workspace
+
+A self-contained demo environment lives in `examples/workspace/`. It
+creates two local git repos (hello-cli and calculator) with multiple
+tagged versions, deploys them via the manifest, and generates
+modulefiles — all without network access.
+
+```bash
+cd examples/workspace
+./setup.sh                    # creates repos, resolves paths, deploys v1.0.0
+
+# Tools are deployed and ready
+deploy/hello-cli/1.0.0/bin/hello          # => Hello, World!
+deploy/calculator/1.0.0/bin/calc add 2 3  # => 5
+
+# Modulefiles are generated
+ls modulefiles/hello-cli/
+ls modulefiles/calculator/
+```
+
+The workspace demonstrates all four subcommands:
+
+```bash
+DEPLOY="../../scripts/deploy.sh"
+OPTS="--manifest manifest/tools.json --config manifest/.release.conf -n"
+
+$DEPLOY scan $OPTS                                      # check for updates
+$DEPLOY upgrade hello-cli $OPTS                         # deploy latest version
+$DEPLOY deploy calculator --version 1.1.0 $OPTS         # deploy specific version
+$DEPLOY toolset demo-suite --version 1.0.0 $OPTS        # combined modulefile
+```
+
+See [`examples/workspace/README.md`](examples/workspace/README.md) for
+the full walkthrough, CI/CD automation patterns, and customisation
+guide. Run `./teardown.sh` to clean up.
 
 ---
 
@@ -250,7 +334,9 @@ python3 -m unittest tests/test_deploy.py
 See **[GUIDE.md](GUIDE.md)** for the complete user guide covering:
 - Setting up `tools.json` from scratch
 - Full workflow walkthroughs (release → deploy → toolset)
-- Bootstrap scripts
+- Externally managed tools and container deployments
+- Bootstrap commands
 - Modulefile template system and placeholders
+- Disk source archive extraction
 - CI/CD integration patterns
 - Troubleshooting reference

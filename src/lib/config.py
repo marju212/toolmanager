@@ -10,9 +10,7 @@ Priority (highest wins):
 
 import os
 import stat
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
+from dataclasses import dataclass
 
 from .log import log_info, log_warn, log_error
 
@@ -21,7 +19,6 @@ _ENV_SNAPSHOT = {
     "RELEASE_DEFAULT_BRANCH": os.environ.get("RELEASE_DEFAULT_BRANCH", ""),
     "RELEASE_TAG_PREFIX": os.environ.get("RELEASE_TAG_PREFIX", ""),
     "RELEASE_REMOTE": os.environ.get("RELEASE_REMOTE", ""),
-    "DEPLOY_BASE_PATH": os.environ.get("DEPLOY_BASE_PATH", ""),
     "MODULEFILE_TEMPLATE": os.environ.get("MODULEFILE_TEMPLATE", ""),
     "MF_BASE_PATH": os.environ.get("MF_BASE_PATH", ""),
     "TOOLS_MANIFEST": os.environ.get("TOOLS_MANIFEST", ""),
@@ -32,7 +29,6 @@ _CONFIG_KEY_TO_ENV = {
     "DEFAULT_BRANCH": "RELEASE_DEFAULT_BRANCH",
     "TAG_PREFIX": "RELEASE_TAG_PREFIX",
     "REMOTE": "RELEASE_REMOTE",
-    "DEPLOY_BASE_PATH": "DEPLOY_BASE_PATH",
     "MODULEFILE_TEMPLATE": "MODULEFILE_TEMPLATE",
     "MF_BASE_PATH": "MF_BASE_PATH",
     "TOOLS_MANIFEST": "TOOLS_MANIFEST",
@@ -108,7 +104,7 @@ def _parse_conf_file(filepath: str) -> dict:
     return result
 
 
-def _apply_conf(config: Config, conf: dict) -> None:
+def _apply_conf(config: Config, conf: dict, source_label: str = "config file") -> None:
     """Apply a parsed config dict to a Config object."""
     if "DEFAULT_BRANCH" in conf:
         config.default_branch = conf["DEFAULT_BRANCH"]
@@ -116,8 +112,6 @@ def _apply_conf(config: Config, conf: dict) -> None:
         config.tag_prefix = conf["TAG_PREFIX"]
     if "REMOTE" in conf:
         config.remote = conf["REMOTE"]
-    if "DEPLOY_BASE_PATH" in conf:
-        config.deploy_base_path = conf["DEPLOY_BASE_PATH"]
     if "MODULEFILE_TEMPLATE" in conf:
         config.modulefile_template = conf["MODULEFILE_TEMPLATE"]
     if "MF_BASE_PATH" in conf:
@@ -146,16 +140,8 @@ def load_config(
         Resolved Config object.
     """
     config = Config()
-    home = Path.home()
 
-    # 1. User-level config
-    user_conf = home / ".release.conf"
-    if user_conf.is_file():
-        _warn_file_permissions(str(user_conf))
-        log_info(f"Loading config: {user_conf}")
-        _apply_conf(config, _parse_conf_file(str(user_conf)))
-
-    # 2. Repo-level config
+    # 1. Repo-level config
     if repo_root:
         repo_conf = os.path.join(repo_root, ".release.conf")
         if os.path.isfile(repo_conf):
@@ -163,7 +149,7 @@ def load_config(
             log_info(f"Loading config: {repo_conf}")
             _apply_conf(config, _parse_conf_file(repo_conf))
 
-    # 3. Explicit --config file
+    # 2. Explicit --config file
     if config_file:
         if not os.path.isfile(config_file):
             log_error(f"Config file not found: {config_file}")
@@ -172,15 +158,13 @@ def load_config(
         log_info(f"Loading config: {config_file}")
         _apply_conf(config, _parse_conf_file(config_file))
 
-    # 4. Env vars override everything (from snapshot)
+    # 3. Env vars override everything (from snapshot)
     if _ENV_SNAPSHOT["RELEASE_DEFAULT_BRANCH"]:
         config.default_branch = _ENV_SNAPSHOT["RELEASE_DEFAULT_BRANCH"]
     if _ENV_SNAPSHOT["RELEASE_TAG_PREFIX"]:
         config.tag_prefix = _ENV_SNAPSHOT["RELEASE_TAG_PREFIX"]
     if _ENV_SNAPSHOT["RELEASE_REMOTE"]:
         config.remote = _ENV_SNAPSHOT["RELEASE_REMOTE"]
-    if _ENV_SNAPSHOT["DEPLOY_BASE_PATH"]:
-        config.deploy_base_path = _ENV_SNAPSHOT["DEPLOY_BASE_PATH"]
     if _ENV_SNAPSHOT["MODULEFILE_TEMPLATE"]:
         config.modulefile_template = _ENV_SNAPSHOT["MODULEFILE_TEMPLATE"]
     if _ENV_SNAPSHOT["MF_BASE_PATH"]:
@@ -188,7 +172,7 @@ def load_config(
     if _ENV_SNAPSHOT["TOOLS_MANIFEST"]:
         config.tools_manifest = _ENV_SNAPSHOT["TOOLS_MANIFEST"]
 
-    # 5. CLI overrides take highest precedence
+    # 4. CLI overrides take highest precedence
     if cli_deploy_path:
         config.deploy_base_path = cli_deploy_path
     if cli_mf_path:
