@@ -270,6 +270,26 @@ def set_tool_available(data: dict, name: str, versions: list) -> None:
     data["tools"][name]["available"] = versions
 
 
+def collect_string_vars(data: dict, *scopes: dict) -> dict:
+    """Collect string-valued keys from root through nested scopes (closest wins).
+
+    Walks *data* (the root manifest dict) first, then each element of *scopes*
+    in order.  Later scopes override earlier ones.  Non-string values (dicts,
+    lists, booleans, numbers) are silently skipped.  All values are stripped of
+    leading/trailing whitespace.
+    """
+    merged: dict[str, str] = {}
+    for k, v in data.items():
+        if isinstance(v, str):
+            merged[k] = v.strip()
+    for scope in scopes:
+        if isinstance(scope, dict):
+            for k, v in scope.items():
+                if isinstance(v, str):
+                    merged[k] = v.strip()
+    return merged
+
+
 def resolve_manifest_path(config) -> str:
     """Resolve tools.json path from config or fall back to cwd/tools.json."""
     if config.tools_manifest:

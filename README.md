@@ -208,8 +208,8 @@ Reads the named toolset from `tools.json`, collects current deployed versions of
 | `source` | Yes | Source config: `{"type": "git", "url": "..."}`, `{"type": "archive", "path": "..."}`, or `{"type": "external", "path": "..."}` |
 | `version` | No | Current deployed version (updated automatically on deploy) |
 | `available` | No | List of available versions (populated by `scan`) |
-| `install_path` | No | Custom deploy path; relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` |
-| `mf_path` | No | Custom modulefile path; relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` |
+| `install_path` | No | Custom deploy path; relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` |
+| `mf_path` | No | Custom modulefile path; relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` |
 | `bootstrap` | No | Shell command to run after deploy |
 | `flatten_archive` | No | For archive sources: flatten single-root directories after extraction (default: `true`) |
 

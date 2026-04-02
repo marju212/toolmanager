@@ -20,6 +20,7 @@ from lib.manifest import (
     get_toolset_version,
     set_tool_available,
     resolve_manifest_path,
+    collect_string_vars,
 )
 
 VALID_MANIFEST = {
@@ -404,6 +405,57 @@ class TestSetToolAvailable(unittest.TestCase):
         data = copy.deepcopy(VALID_MANIFEST_V2)
         set_tool_available(data, "tool-a", ["3.0.0"])
         self.assertEqual(data["tools"]["tool-a"]["available"], ["3.0.0"])
+
+
+# ---------------------------------------------------------------------------
+# collect_string_vars
+# ---------------------------------------------------------------------------
+
+class TestCollectStringVars(unittest.TestCase):
+    def test_root_only(self):
+        data = {"org": "acme", "env": "prod", "tools": {}}
+        result = collect_string_vars(data)
+        self.assertEqual(result["org"], "acme")
+        self.assertEqual(result["env"], "prod")
+
+    def test_tool_overrides_root(self):
+        data = {"org": "acme", "env": "prod"}
+        tool = {"env": "dev", "version": "1.0.0"}
+        result = collect_string_vars(data, tool)
+        self.assertEqual(result["org"], "acme")
+        self.assertEqual(result["env"], "dev")
+
+    def test_three_levels(self):
+        data = {"org": "acme", "env": "prod", "region": "us"}
+        toolset = {"env": "staging"}
+        tool = {"region": "eu"}
+        result = collect_string_vars(data, toolset, tool)
+        self.assertEqual(result["org"], "acme")
+        self.assertEqual(result["env"], "staging")
+        self.assertEqual(result["region"], "eu")
+
+    def test_no_string_keys(self):
+        data = {"tools": {}, "toolsets": {}}
+        result = collect_string_vars(data)
+        self.assertEqual(result, {})
+
+    def test_skips_non_string_values(self):
+        data = {"org": "acme", "tools": {"a": {}}, "count": 5}
+        result = collect_string_vars(data)
+        self.assertIn("org", result)
+        self.assertNotIn("tools", result)
+        self.assertNotIn("count", result)
+
+    def test_trims_whitespace(self):
+        data = {"org": "  acme  ", "env": " prod\n"}
+        result = collect_string_vars(data)
+        self.assertEqual(result["org"], "acme")
+        self.assertEqual(result["env"], "prod")
+
+    def test_empty_scopes(self):
+        data = {"org": "acme"}
+        result = collect_string_vars(data, {}, {})
+        self.assertEqual(result["org"], "acme")
 
 
 if __name__ == "__main__":

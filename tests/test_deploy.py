@@ -497,7 +497,7 @@ class TestDeployExternalSource(unittest.TestCase):
             "tool-b": {
                 "version": "0.0.0",
                 "source": {"type": "external", "path": self.disk_source},
-                "install_path": "custom/tool-b/%version%",
+                "install_path": "custom/tool-b/{{version}}",
             }
         })
         config = self._config()
@@ -517,7 +517,7 @@ class TestDeployExternalSource(unittest.TestCase):
             "tool-b": {
                 "version": "0.0.0",
                 "source": {"type": "external", "path": self.disk_source},
-                "mf_path": "custom_mf/tool-b/%version%",
+                "mf_path": "custom_mf/tool-b/{{version}}",
             }
         })
         config = self._config()
@@ -905,7 +905,7 @@ class TestToolsetCmdDictFormat(unittest.TestCase):
 class TestResolvePathTemplate(unittest.TestCase):
     def test_both_placeholders(self):
         result = _resolve_path_template(
-            "/opt/apps/%tool%/%version%", "gcc", "1.2.3"
+            "/opt/apps/{{toolname}}/{{version}}", "gcc", "1.2.3"
         )
         self.assertEqual(result, "/opt/apps/gcc/1.2.3")
 
@@ -914,12 +914,45 @@ class TestResolvePathTemplate(unittest.TestCase):
         self.assertEqual(result, "/opt/static/path")
 
     def test_tool_only(self):
-        result = _resolve_path_template("/opt/%tool%/latest", "gcc", "1.0.0")
+        result = _resolve_path_template("/opt/{{toolname}}/latest", "gcc", "1.0.0")
         self.assertEqual(result, "/opt/gcc/latest")
 
     def test_version_only(self):
-        result = _resolve_path_template("/opt/tool/%version%", "gcc", "2.0.0")
+        result = _resolve_path_template("/opt/tool/{{version}}", "gcc", "2.0.0")
         self.assertEqual(result, "/opt/tool/2.0.0")
+
+    def test_user_vars_substituted(self):
+        result = _resolve_path_template(
+            "/opt/{{org}}/{{toolname}}/{{version}}", "gcc", "1.0.0",
+            user_vars={"org": "acme"},
+        )
+        self.assertEqual(result, "/opt/acme/gcc/1.0.0")
+
+    def test_multiple_user_vars(self):
+        result = _resolve_path_template(
+            "/{{org}}/{{env}}/{{toolname}}", "gcc", "1.0.0",
+            user_vars={"org": "acme", "env": "prod"},
+        )
+        self.assertEqual(result, "/acme/prod/gcc")
+
+    def test_builtin_overrides_user_var(self):
+        result = _resolve_path_template(
+            "/opt/{{toolname}}/{{version}}", "gcc", "2.0.0",
+            user_vars={"toolname": "should-not-appear", "version": "nope"},
+        )
+        self.assertEqual(result, "/opt/gcc/2.0.0")
+
+    def test_unresolved_placeholder_exits(self):
+        with self.assertRaises(SystemExit):
+            _resolve_path_template(
+                "/opt/{{unknown}}/{{toolname}}", "gcc", "1.0.0"
+            )
+
+    def test_no_user_vars_backward_compat(self):
+        result = _resolve_path_template(
+            "/opt/{{toolname}}/{{version}}", "gcc", "1.0.0"
+        )
+        self.assertEqual(result, "/opt/gcc/1.0.0")
 
 
 # ---------------------------------------------------------------------------
@@ -1199,13 +1232,13 @@ class TestDeployCustomPaths(unittest.TestCase):
         return Config(**defaults)
 
     def test_install_path_substitution(self):
-        """install_path with %tool%/%version% resolves correctly."""
+        """install_path with {{toolname}}/{{version}} resolves correctly."""
         install_dir = os.path.join(self.tmpdir, "apps")
         os.makedirs(install_dir)
         _write_manifest(self.manifest_path, {
             "tool-d": {
                 "version": "",
-                "install_path": os.path.join(install_dir, "%tool%", "%version%"),
+                "install_path": os.path.join(install_dir, "{{toolname}}", "{{version}}"),
                 "source": {"type": "external", "path": self.disk_source},
             }
         })
@@ -1219,10 +1252,10 @@ class TestDeployCustomPaths(unittest.TestCase):
         self.assertEqual(data["tools"]["tool-d"]["version"], "1.0.0")
 
     def test_mf_path_substitution(self):
-        """mf_path with %tool%/%version% writes modulefile to custom location."""
+        """mf_path with {{toolname}}/{{version}} writes modulefile to custom location."""
         mf_dir = os.path.join(self.tmpdir, "custom_mf")
         os.makedirs(mf_dir)
-        mf_template = os.path.join(mf_dir, "%tool%", "%version%")
+        mf_template = os.path.join(mf_dir, "{{toolname}}", "{{version}}")
         _write_manifest(self.manifest_path, {
             "tool-d": {
                 "version": "",
@@ -1888,7 +1921,7 @@ class TestResolvedPathValidation(unittest.TestCase):
                 "tool-rp": {
                     "version": "",
                     "source": {"type": "external", "path": self.disk_source},
-                    "install_path": "relative/path/%version%",
+                    "install_path": "relative/path/{{version}}",
                 }
             },
             "toolsets": {},
@@ -1908,7 +1941,7 @@ class TestResolvedPathValidation(unittest.TestCase):
                 "tool-rp": {
                     "version": "",
                     "source": {"type": "external", "path": self.disk_source},
-                    "mf_path": "relative/mf/%version%",
+                    "mf_path": "relative/mf/{{version}}",
                 }
             },
             "toolsets": {},
@@ -2005,7 +2038,7 @@ class TestApplyCmd(unittest.TestCase):
             "tool-a": {
                 "version": "",
                 "source": {"type": "external", "path": self.source_a},
-                "install_path": "%tool%/%version%",
+                "install_path": "{{toolname}}/{{version}}",
             },
         }
         _write_manifest(self.manifest_path, tools=tools, toolsets={

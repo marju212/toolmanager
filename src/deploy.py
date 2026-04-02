@@ -48,7 +48,7 @@ from lib.semver import validate_semver
 from lib.manifest import (
     load_manifest, save_manifest, get_tool, set_tool_version,
     get_toolset, get_toolset_tool_versions, get_toolset_version,
-    set_tool_available, resolve_manifest_path,
+    set_tool_available, resolve_manifest_path, collect_string_vars,
 )
 from lib.sources import build_adapter, SourceError
 from lib.modulefile import (
@@ -118,9 +118,42 @@ Options:
 """
 
 
-def _resolve_path_template(template: str, tool_name: str, version: str) -> str:
-    """Resolve %tool% and %version% placeholders in a path template."""
-    return template.replace("%tool%", tool_name).replace("%version%", version)
+def _resolve_path_template(
+    template: str,
+    tool_name: str,
+    version: str,
+    user_vars: dict[str, str] | None = None,
+) -> str:
+    """Resolve ``{{...}}`` placeholders in a path template.
+
+    *user_vars* carries custom string-valued keys collected from the manifest
+    via :func:`collect_string_vars`.  Built-in variables (``toolname`` and
+    ``version``) always take precedence over user-defined ones.
+
+    Raises :class:`SystemExit` if any ``{{...}}`` placeholders remain
+    unresolved after substitution.
+    """
+    merged = dict(user_vars) if user_vars else {}
+    merged["toolname"] = tool_name
+    merged["version"] = version
+
+    def _replacer(match: re.Match) -> str:
+        key = match.group(1)
+        if key in merged:
+            return merged[key]
+        return match.group(0)
+
+    result = re.sub(r"\{\{(\w+)\}\}", _replacer, template)
+
+    unresolved = re.findall(r"\{\{(\w+)\}\}", result)
+    if unresolved:
+        log_error(
+            f"Unresolved placeholders in path template: "
+            f"{', '.join('{{' + p + '}}' for p in unresolved)}"
+        )
+        raise SystemExit(1)
+
+    return result
 
 
 def _check_no_symlink(path: str, label: str) -> None:
@@ -420,10 +453,29 @@ def _prompt_version_interactive(
 
 
 def _apply_manifest_deploy_base(config, data: dict) -> None:
-    """Fall back to manifest deploy_base_path when CLI did not set one."""
+    """Fall back to manifest deploy_base_path when CLI did not set one.
+
+    Root-level custom string vars are resolved in the path.  ``{{toolname}}``
+    and ``{{version}}`` are **not** available at this scope.
+    """
     if not config.deploy_base_path:
         manifest_path = data.get("deploy_base_path", "")
         if manifest_path:
+            root_vars = {k: v.strip() for k, v in data.items()
+                         if isinstance(v, str)}
+
+            def _replacer(match: re.Match) -> str:
+                return root_vars.get(match.group(1), match.group(0))
+
+            manifest_path = re.sub(r"\{\{(\w+)\}\}", _replacer, manifest_path)
+            unresolved = re.findall(r"\{\{(\w+)\}\}", manifest_path)
+            if unresolved:
+                log_error(
+                    f"deploy_base_path contains unresolved placeholders: "
+                    f"{', '.join('{{' + p + '}}' for p in unresolved)}. "
+                    f"Only root-level string keys are available here."
+                )
+                raise SystemExit(1)
             config.deploy_base_path = manifest_path
 
 
@@ -514,10 +566,11 @@ def cmd_deploy(
             )
 
     # ------------------------------------------------- resolve custom paths
+    user_vars = collect_string_vars(data, tool_entry)
     raw_install_path = tool_entry.get("install_path")
     if raw_install_path:
         resolved_install_path = _resolve_path_template(
-            raw_install_path, tool_name, version
+            raw_install_path, tool_name, version, user_vars=user_vars
         )
         if not os.path.isabs(resolved_install_path):
             resolved_install_path = os.path.join(
@@ -535,7 +588,7 @@ def cmd_deploy(
     raw_mf_path = tool_entry.get("mf_path")
     if raw_mf_path:
         resolved_mf_path = _resolve_path_template(
-            raw_mf_path, tool_name, version
+            raw_mf_path, tool_name, version, user_vars=user_vars
         )
         if not os.path.isabs(resolved_mf_path):
             resolved_mf_path = os.path.join(
@@ -1113,10 +1166,13 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
             continue
 
         # Resolve install path
+        ts_name_for_vars = sorted(ts_names)[0]
+        ts_entry_for_vars = selected_toolsets[ts_name_for_vars]
+        user_vars = collect_string_vars(data, ts_entry_for_vars, tool_entry)
         raw_install_path = tool_entry.get("install_path")
         if raw_install_path:
             deploy_target = _resolve_path_template(
-                raw_install_path, tool_name, version
+                raw_install_path, tool_name, version, user_vars=user_vars
             )
             if not os.path.isabs(deploy_target):
                 deploy_target = os.path.join(
@@ -1200,7 +1256,7 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
             resolved_mf_path = None
             if raw_mf_path:
                 resolved_mf_path = _resolve_path_template(
-                    raw_mf_path, tool_name, version
+                    raw_mf_path, tool_name, version, user_vars=user_vars
                 )
                 if not os.path.isabs(resolved_mf_path):
                     resolved_mf_path = os.path.join(

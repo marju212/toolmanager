@@ -1,5 +1,6 @@
 {
   "deploy_base_path": "__WORKSPACE__/deploy",
+  "app_root": "apps",
   "tools": {
     "hello-cli": {
       "version": "1.0.0",
@@ -24,7 +25,9 @@
       "source": {
         "type": "archive",
         "path": "__WORKSPACE__/archives/text-tools"
-      }
+      },
+      "install_path": "{{app_root}}/{{toolname}}/{{version}}",
+      "mf_path": "modulefiles/{{toolname}}/{{version}}"
     },
     "json-viewer": {
       "version": "1.0.0",

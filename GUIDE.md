@@ -147,8 +147,8 @@ Create a `tools.json` file describing your tools. The path defaults to `tools.js
 | `version` | No | string | Current deployed version — updated automatically on deploy |
 | `available` | No | list | All available versions — populated by `scan` |
 | ~~`deploy`~~ | — | — | **Removed.** Use source type `"external"` instead (see Part 6). |
-| `install_path` | No | string | Custom deploy path. Relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` placeholders. |
-| `mf_path` | No | string | Custom modulefile path. Relative paths resolve against `deploy_base_path`. Supports `%tool%` and `%version%` placeholders. |
+| `install_path` | No | string | Custom deploy path. Relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` placeholders. |
+| `mf_path` | No | string | Custom modulefile path. Relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` placeholders. |
 | `bootstrap` | No | string | Shell command to run after deployment completes |
 | `flatten_archive` | No | boolean | For archive sources: flatten single-root directories after extraction (default: `true`) |
 
@@ -690,7 +690,7 @@ Combine source type `"external"` with a relative `install_path` to control where
         "type": "external",
         "path": "/opt/external/matlab"
       },
-      "install_path": "opt/external/matlab/%version%"
+      "install_path": "opt/external/matlab/{{version}}"
     }
   }
 }
@@ -778,13 +778,13 @@ These per-tool fields support two forms:
 **Absolute paths** — used as-is:
 
 ```json
-"install_path": "/opt/custom/my-tool/%version%"
+"install_path": "/opt/custom/my-tool/{{version}}"
 ```
 
 **Relative paths** — joined with `deploy_base_path`:
 
 ```json
-"install_path": "opt/custom/my-tool/%version%"
+"install_path": "opt/custom/my-tool/{{version}}"
 ```
 
 With `--deploy-path /local/export`, this resolves to `/local/export/opt/custom/my-tool/1.0.0`.
@@ -797,8 +797,8 @@ Both `install_path` and `mf_path` support:
 
 | Placeholder | Value |
 |---|---|
-| `%tool%` | Tool name |
-| `%version%` | Version being deployed |
+| `{{toolname}}` | Tool name |
+| `{{version}}` | Version being deployed |
 
 ---
 
@@ -1013,7 +1013,7 @@ deploy.sh toolset science --version 1.0.0 --manifest /etc/tools.json
 ### 9.5 Deploy an External Tool into a Container
 
 ```bash
-# tools.json has matlab with source type "external" and install_path: "opt/external/matlab/%version%"
+# tools.json has matlab with source type "external" and install_path: "opt/external/matlab/{{version}}"
 
 # Scan to see what versions IT has published
 deploy.sh scan

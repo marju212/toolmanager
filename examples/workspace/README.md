@@ -66,8 +66,8 @@ Key fields per tool:
 | `version` | No | Current deployed version (auto-updated on deploy) |
 | `available` | No | List of available versions (populated by `scan`) |
 | `bootstrap` | No | Shell command to run after deploy (receives env vars, see below) |
-| `install_path` | No | Custom install path (supports `%tool%` and `%version%` placeholders) |
-| `mf_path` | No | Custom modulefile path (supports `%tool%` and `%version%` placeholders) |
+| `install_path` | No | Custom install path (supports `{{toolname}}` and `{{version}}` placeholders) |
+| `mf_path` | No | Custom modulefile path (supports `{{toolname}}` and `{{version}}` placeholders) |
 | `flatten_archive` | No | For archive sources: flatten single-root dirs after extraction (default: `true`) |
 
 ### Source Types
@@ -539,13 +539,13 @@ per-tool basis:
 ```json
 "my-tool": {
   "source": { "type": "git", "url": "..." },
-  "install_path": "custom/my-tool/%version%",
-  "mf_path": "custom_mf/my-tool/%version%"
+  "install_path": "custom/my-tool/{{version}}",
+  "mf_path": "custom_mf/my-tool/{{version}}"
 }
 ```
 
 Relative paths are resolved against `deploy_base_path`. Supported
-placeholders: `%tool%`, `%version%`.
+placeholders: `{{toolname}}`, `{{version}}`.
 
 ### Custom Modulefile Template
 
