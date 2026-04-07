@@ -68,7 +68,7 @@ def get_repo_root(path: str | None = None) -> str:
     try:
         result = _run_git("rev-parse", "--show-toplevel", cwd=path)
         return result.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return os.getcwd()
 
 
@@ -89,7 +89,7 @@ def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> No
     # Must be inside a git repo
     try:
         _run_git("rev-parse", "--is-inside-work-tree", cwd=cwd)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         log_error("Not inside a git repository.")
         raise SystemExit(1)
 
@@ -102,7 +102,7 @@ def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> No
             log_error(f"Must be on '{default_branch}' branch "
                       f"(currently on '{current_branch}').")
             raise SystemExit(1)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         detached_head = True
         log_info("Detached HEAD detected (common in CI environments).")
 
@@ -116,6 +116,10 @@ def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> No
     log_info(f"Fetching from {remote}...")
     try:
         _run_git("fetch", remote, "--tags", "--quiet", cwd=cwd)
+    except subprocess.TimeoutExpired:
+        log_error(f"Timed out fetching from '{remote}' "
+                  f"(timeout: {_GIT_TIMEOUT}s).")
+        raise SystemExit(1)
     except subprocess.CalledProcessError:
         log_error(f"Failed to fetch from '{remote}'. "
                   "Check credentials and network connectivity.")
@@ -128,7 +132,7 @@ def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> No
     try:
         result = _run_git("rev-parse", f"{remote}/{default_branch}", cwd=cwd)
         remote_sha = result.stdout.strip()
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         remote_sha = ""
 
     if not remote_sha:
@@ -161,7 +165,7 @@ def get_latest_version(tag_prefix: str, cwd: str | None = None) -> str:
     try:
         result = _run_git("tag", "--list", f"{tag_prefix}*",
                           "--sort=-v:refname", cwd=cwd)
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         log_info("No version tags found — treating as first release.")
         return "0.0.0"
 

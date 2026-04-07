@@ -1475,7 +1475,8 @@ def main(argv: list = None) -> None:
     from lib.git import get_repo_root
     try:
         repo_root = get_repo_root()
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+            FileNotFoundError, OSError):
         repo_root = ""
 
     config = load_config(
