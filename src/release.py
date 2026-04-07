@@ -61,9 +61,15 @@ Config files (loaded in order, later values win):
 
 
 def parse_args(argv: list) -> dict:
-    """Parse command-line arguments.
+    """Parse release CLI arguments into a flat dict.
 
-    Returns dict with parsed values.
+    Recognised flags: ``--dry-run``, ``--config FILE``,
+    ``--version X.Y.Z``, ``--description TEXT``,
+    ``--non-interactive`` / ``-n``, ``--help`` / ``-h``.
+
+    Returns:
+        Dict with keys ``dry_run``, ``config_file``, ``cli_version``,
+        ``description``, and ``non_interactive``.
     """
     args = {
         "dry_run": False,
@@ -111,7 +117,7 @@ def parse_args(argv: list) -> dict:
 
 
 def print_summary(branch: str, tag: str, dry_run: bool = False) -> None:
-    """Print a boxed release summary."""
+    """Print a Unicode-boxed release summary to stderr showing branch and tag."""
     rows = [
         f"Branch:   {branch}",
         f"Tag:      {tag}",
@@ -141,7 +147,11 @@ def print_summary(branch: str, tag: str, dry_run: bool = False) -> None:
 
 
 def main(argv: list = None) -> None:
-    """Main release flow."""
+    """Entry point for the release tool.
+
+    Orchestrates the full release flow: parse args, load config, validate
+    repo state, pick a version, generate changelog, confirm, tag, and push.
+    """
     if argv is None:
         argv = sys.argv[1:]
 

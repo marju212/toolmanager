@@ -32,9 +32,15 @@ import zipfile
 from .log import log_info, log_success
 from .semver import validate_semver
 
+_GIT_TIMEOUT = int(os.environ.get("TOOLMANAGER_GIT_TIMEOUT", "120"))
+
 
 class SourceError(Exception):
-    """Raised when a source adapter cannot complete an operation."""
+    """Raised when a source adapter cannot complete an operation.
+
+    Callers decide how to handle it: ``deploy`` treats it as fatal,
+    ``scan`` logs the error and continues to the next tool.
+    """
     pass
 
 
@@ -42,7 +48,10 @@ _ARCHIVE_EXTENSIONS = ('.tar.gz', '.tar.bz2', '.tar.xz', '.tgz', '.zip')
 
 
 def _find_archives(directory: str) -> list:
-    """Return list of archive file paths in the given directory."""
+    """Scan *directory* for files with known archive extensions and return their paths.
+
+    Supported extensions: ``.tar.gz``, ``.tar.bz2``, ``.tar.xz``, ``.tgz``, ``.zip``.
+    """
     archives = []
     for entry in os.listdir(directory):
         path = os.path.join(directory, entry)
@@ -54,7 +63,7 @@ def _find_archives(directory: str) -> list:
 
 
 def _extract_archive(archive_path: str, dest: str) -> None:
-    """Extract a single archive file into dest directory."""
+    """Detect archive type by extension and extract into *dest*."""
     lower = archive_path.lower()
     if lower.endswith('.zip'):
         _extract_zip(archive_path, dest)
@@ -63,13 +72,22 @@ def _extract_archive(archive_path: str, dest: str) -> None:
 
 
 def _extract_tar(archive_path: str, dest: str) -> None:
-    """Extract a tar archive with security filter."""
+    """Extract a tar archive using the ``data`` filter (Python 3.12+).
+
+    The ``data`` filter blocks absolute paths, ``..`` traversal, and
+    device/special files — the same protections applied manually for zip.
+    """
     with tarfile.open(archive_path) as tf:
         tf.extractall(path=dest, filter='data')
 
 
 def _extract_zip(archive_path: str, dest: str) -> None:
-    """Extract a zip archive with path traversal protection."""
+    """Extract a zip archive with explicit path traversal protection.
+
+    Every entry is checked twice: once for ``..`` components in the raw
+    filename, and again by resolving the final path to ensure it stays
+    inside *dest* (guards against symlink tricks).
+    """
     real_dest = os.path.realpath(dest)
     with zipfile.ZipFile(archive_path) as zf:
         for info in zf.infolist():
@@ -91,7 +109,13 @@ def _extract_zip(archive_path: str, dest: str) -> None:
 
 
 def _flatten_single_root(directory: str) -> None:
-    """If directory has exactly one subdirectory and no files, move contents up."""
+    """Eliminate a useless wrapper directory after extraction.
+
+    Many archives contain a single top-level directory (e.g.
+    ``tool-1.0.0/bin/...``).  This moves the contents up one level so
+    the deploy path points directly at the tool files.  Does nothing if
+    the directory has multiple entries or contains loose files.
+    """
     entries = os.listdir(directory)
     if len(entries) != 1:
         return
@@ -120,7 +144,11 @@ class GitAdapter:
         self.tag_prefix = tag_prefix
 
     def get_available_versions(self) -> list:
-        """List available semver versions via git ls-remote."""
+        """Query the remote for tags and return sorted semver versions.
+
+        Runs ``git ls-remote --tags`` against ``self.url``, strips the
+        tag prefix, filters to valid semver, and sorts ascending.
+        """
         try:
             result = subprocess.run(
                 [
@@ -128,7 +156,13 @@ class GitAdapter:
                     "ls-remote", "--tags", "--sort=v:refname", self.url,
                 ],
                 capture_output=True, text=True, check=True,
+                timeout=_GIT_TIMEOUT,
             )
+        except subprocess.TimeoutExpired as e:
+            raise SourceError(
+                f"Timed out listing tags from {self.url} "
+                f"(timeout: {_GIT_TIMEOUT}s)"
+            ) from e
         except subprocess.CalledProcessError as e:
             detail = e.stderr.strip() if e.stderr else str(e)
             raise SourceError(
@@ -166,7 +200,11 @@ class GitAdapter:
         dry_run: bool = False,
         install_path: str | None = None,
     ) -> str:
-        """Clone tagged version into deploy directory."""
+        """Shallow-clone the tagged commit into the deploy directory.
+
+        Creates ``<deploy_base_path>/<tool_name>/<version>/`` (or
+        *install_path* if given).  Returns the path to the cloned directory.
+        """
         tag = f"{self.tag_prefix}{version}"
         deploy_dir = install_path or os.path.join(deploy_base_path, tool_name, version)
 
@@ -188,7 +226,12 @@ class GitAdapter:
                     self.url, deploy_dir,
                 ],
                 capture_output=True, text=True, check=True,
+                timeout=_GIT_TIMEOUT,
             )
+        except subprocess.TimeoutExpired as e:
+            raise SourceError(
+                f"Timed out cloning {tag} (timeout: {_GIT_TIMEOUT}s)"
+            ) from e
         except subprocess.CalledProcessError as e:
             detail = e.stderr.strip() if e.stderr else str(e)
             raise SourceError(f"Failed to clone {tag}: {detail}") from e
@@ -205,6 +248,7 @@ class _DiskVersionScanner:
     """
 
     def _scan_versions(self, path: str) -> list:
+        """List subdirectories of *path* whose names are valid semver, sorted ascending."""
         if not os.path.isdir(path):
             raise SourceError(f"Source path does not exist: {path}")
         semver_re = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
@@ -249,7 +293,12 @@ class ArchiveAdapter(_DiskVersionScanner):
         install_path: str | None = None,
         flatten_archive: bool = True,
     ) -> str:
-        """Extract archives from version directory to deploy target."""
+        """Extract all archives from the version directory into the deploy target.
+
+        Archives are extracted into a temp directory first, optionally
+        flattened (see ``_flatten_single_root``), then copied to the
+        final location.  On failure the partially-created target is removed.
+        """
         version_dir = os.path.join(self.path, version)
         if not os.path.isdir(version_dir):
             raise SourceError(
@@ -289,7 +338,7 @@ class ArchiveAdapter(_DiskVersionScanner):
             if os.path.isdir(target):
                 shutil.rmtree(target, ignore_errors=True)
             raise
-        except Exception as e:
+        except (tarfile.TarError, zipfile.BadZipFile, OSError) as e:
             if os.path.isdir(target):
                 shutil.rmtree(target, ignore_errors=True)
             raise SourceError(
@@ -341,17 +390,20 @@ class ExternalAdapter(_DiskVersionScanner):
                 f"Version directory does not exist: {version_dir}"
             )
         if dry_run:
-            log_info(f"[dry-run] External source: would use {version_dir}")
+            log_info(f"[dry-run] Would use external source: {version_dir}")
         else:
             log_info(f"Using external source: {version_dir}")
         return version_dir
 
 
 def build_adapter(tool_entry: dict, tag_prefix: str = "v"):
-    """Factory: create the right adapter from a tool's manifest entry.
+    """Create the correct source adapter for a tool based on its ``source.type``.
 
-    Reads source.type to decide which adapter class to instantiate.
-    Raises SystemExit for unknown source types.
+    This is the only place that maps the string ``"git"`` / ``"archive"`` /
+    ``"external"`` to the corresponding adapter class.  Returns an adapter
+    instance ready to call ``get_available_versions()`` or ``deploy()``.
+
+    Raises ``SystemExit`` for unrecognised source types.
     """
     from .log import log_error
     source = tool_entry["source"]

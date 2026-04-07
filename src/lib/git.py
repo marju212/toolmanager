@@ -1,4 +1,23 @@
-"""Git operations via subprocess."""
+"""Git operations via subprocess.
+
+Thin wrappers around ``git`` CLI commands used by both the release and
+deploy tools.  Every call goes through ``_run_git`` which adds a
+configurable timeout (default 120 s, override with
+``TOOLMANAGER_GIT_TIMEOUT`` env var) so a stalled server cannot hang
+the process indefinitely.
+
+Functions fall into two groups:
+
+**Release helpers** (used by ``release.py``):
+    ``check_branch``          — validate branch, clean tree, remote sync
+    ``get_latest_version``    — find highest semver tag
+    ``check_version_available`` — ensure a tag does not already exist
+    ``generate_changelog``    — commit log since last tag
+    ``tag_release``           — create + push an annotated tag
+
+**General utilities**:
+    ``get_repo_root``         — locate the ``.git`` directory
+"""
 
 import os
 import subprocess
@@ -6,10 +25,29 @@ import subprocess
 from .log import log_info, log_warn, log_error, log_success
 from .semver import validate_semver
 
+# Seconds before a git subprocess is killed.  Override with env var.
+_GIT_TIMEOUT = int(os.environ.get("TOOLMANAGER_GIT_TIMEOUT", "120"))
+
 
 def _run_git(*args: str, cwd: str | None = None, check: bool = True,
              capture: bool = True) -> subprocess.CompletedProcess:
-    """Run a git command and return the result."""
+    """Run ``git <args>`` as a subprocess and return the result.
+
+    All git calls in this module go through here so that timeout, text
+    mode, and output capture are applied consistently.
+
+    Args:
+        args:    Git sub-command and arguments (e.g. ``"tag", "--list"``).
+        cwd:     Working directory for the command (``None`` = inherit).
+        check:   If ``True``, raise ``CalledProcessError`` on non-zero exit.
+        capture: If ``True``, capture stdout/stderr instead of printing.
+
+    Raises:
+        subprocess.CalledProcessError: When *check* is ``True`` and git
+            exits with a non-zero status.
+        subprocess.TimeoutExpired: When the command exceeds
+            ``_GIT_TIMEOUT`` seconds.
+    """
     cmd = ["git"] + list(args)
     return subprocess.run(
         cmd,
@@ -17,11 +55,16 @@ def _run_git(*args: str, cwd: str | None = None, check: bool = True,
         capture_output=capture,
         text=True,
         check=check,
+        timeout=_GIT_TIMEOUT,
     )
 
 
 def get_repo_root(path: str | None = None) -> str:
-    """Get the repository root directory."""
+    """Return the absolute path of the repository root.
+
+    Falls back to the current working directory if ``git rev-parse``
+    fails (e.g. not inside a repo).
+    """
     try:
         result = _run_git("rev-parse", "--show-toplevel", cwd=path)
         return result.stdout.strip()
@@ -30,9 +73,16 @@ def get_repo_root(path: str | None = None) -> str:
 
 
 def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> None:
-    """Validate repository state: correct branch, clean tree, synced with remote.
+    """Verify the repo is ready for a release.
 
-    Raises SystemExit on validation failure.
+    Performs four checks in order:
+
+    1. We are inside a git repository.
+    2. The current branch is *default_branch* (or a detached HEAD in CI).
+    3. The working tree has no uncommitted changes.
+    4. The local HEAD matches ``<remote>/<default_branch>`` (fetched first).
+
+    Raises ``SystemExit`` on the first check that fails.
     """
     log_info("Checking repository state...")
 
@@ -99,9 +149,14 @@ def check_branch(default_branch: str, remote: str, cwd: str | None = None) -> No
 
 
 def get_latest_version(tag_prefix: str, cwd: str | None = None) -> str:
-    """Get the latest strict semver version from tags.
+    """Find the highest semver version among existing tags.
 
-    Returns version string without prefix (e.g. '1.2.3'), or '0.0.0' if no tags.
+    Scans tags matching ``<tag_prefix>*`` (e.g. ``v*``), strips the prefix,
+    validates each as strict semver, and returns the highest one.
+
+    Returns:
+        Version string without prefix (e.g. ``"1.2.3"``), or ``"0.0.0"``
+        if no valid version tags exist (first release).
     """
     try:
         result = _run_git("tag", "--list", f"{tag_prefix}*",
@@ -127,9 +182,10 @@ def get_latest_version(tag_prefix: str, cwd: str | None = None) -> str:
 
 def check_version_available(version: str, tag_prefix: str,
                             cwd: str | None = None) -> None:
-    """Check that the tag doesn't already exist locally.
+    """Ensure the tag ``<tag_prefix><version>`` does not already exist.
 
-    Raises SystemExit if the version is taken.
+    This prevents accidentally re-tagging an existing release.
+    Raises ``SystemExit`` if the tag is found in the local repo.
     """
     tag_name = f"{tag_prefix}{version}"
     result = _run_git("rev-parse", tag_name, cwd=cwd, check=False)
@@ -140,9 +196,11 @@ def check_version_available(version: str, tag_prefix: str,
 
 def generate_changelog(from_version: str, tag_prefix: str,
                        cwd: str | None = None) -> str:
-    """Generate markdown changelog from commits since the given version tag.
+    """Build a bullet-list changelog from git commits.
 
-    Returns changelog string.
+    Lists every non-merge commit between ``<tag_prefix><from_version>``
+    and ``HEAD``.  If that tag does not exist (first release), all commits
+    are included.  Returns ``"- No changes recorded"`` when the log is empty.
     """
     log_info("Generating changelog...")
     current_tag = f"{tag_prefix}{from_version}"
@@ -165,7 +223,12 @@ def generate_changelog(from_version: str, tag_prefix: str,
 def tag_release(tag_name: str, version: str, changelog: str, remote: str,
                 dry_run: bool = False, cwd: str | None = None,
                 description: str = "") -> None:
-    """Create and push an annotated tag."""
+    """Create an annotated tag and push it to *remote*.
+
+    The tag message includes the version number, an optional free-text
+    *description*, and the *changelog*.  In dry-run mode the tag is not
+    created — only a log line is printed.
+    """
     log_info(f"Creating annotated tag '{tag_name}'...")
 
     if dry_run:

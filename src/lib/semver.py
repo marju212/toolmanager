@@ -1,30 +1,43 @@
-"""Semantic versioning validation, suggestion, and comparison."""
+"""Semantic versioning helpers.
+
+This module enforces **strict** semver: exactly three dot-separated
+integers (``X.Y.Z``).  Pre-release suffixes, build metadata, and leading
+zeros are intentionally rejected to keep version comparisons simple — the
+rest of the codebase sorts versions with ``tuple(int(x) for x in v.split("."))``.
+"""
 
 import re
 
+# Matches exactly "1.2.3" — no leading zeros, no pre-release, no build metadata.
 _SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 
 
 def validate_semver(version: str) -> None:
-    """Validate strict X.Y.Z semver format.
+    """Check that *version* is a valid ``X.Y.Z`` string.
 
-    Returns None if valid, raises ValueError if invalid.
+    Raises ``ValueError`` with a descriptive message if the format is wrong.
+    Does nothing (returns ``None``) when valid.
     """
     if not _SEMVER_RE.match(version):
         raise ValueError(f"Invalid semver format: '{version}' (expected X.Y.Z)")
 
 
 def suggest_versions(current: str) -> dict:
-    """Suggest patch, minor, and major version bumps.
+    """Given a current version, return the three possible next versions.
+
+    Example::
+
+        >>> suggest_versions("1.2.3")
+        {"patch": "1.2.4", "minor": "1.3.0", "major": "2.0.0"}
 
     Args:
-        current: Current version string (X.Y.Z).
+        current: The current version string (must pass ``validate_semver``).
 
     Returns:
-        Dict with keys 'patch', 'minor', 'major' containing suggested versions.
+        Dict with keys ``patch``, ``minor``, ``major`` — each a version string.
 
     Raises:
-        ValueError: If current is not a valid X.Y.Z semver string.
+        ValueError: If *current* is not a valid ``X.Y.Z`` string.
     """
     validate_semver(current)
     parts = current.split(".")

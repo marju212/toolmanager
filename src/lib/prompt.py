@@ -1,4 +1,12 @@
-"""Interactive prompts for CLI tools."""
+"""Interactive prompts for CLI tools.
+
+Provides two prompts used throughout the release and deploy workflows:
+
+    confirm()         — yes/no confirmation; auto-accepts in dry-run or
+                        non-interactive mode so CI pipelines can run unattended.
+    prompt_version()  — interactive version picker that shows patch/minor/major
+                        suggestions derived from the current version.
+"""
 
 import sys
 
@@ -8,10 +16,16 @@ from .semver import validate_semver, suggest_versions
 
 def confirm(message: str = "Continue?", dry_run: bool = False,
             non_interactive: bool = False) -> bool:
-    """Prompt user for y/n confirmation.
+    """Ask the user a yes/no question and return their answer.
 
-    Returns True if confirmed, False otherwise.
-    In dry-run or non-interactive mode, always returns True.
+    Behaviour in special modes:
+
+    - **dry_run** — logs the question with a ``[dry-run]`` prefix and
+      returns ``True`` without waiting for input.
+    - **non_interactive** — logs with ``[non-interactive]`` and returns
+      ``True`` (used in CI where stdin is not a terminal).
+
+    Returns ``False`` on EOF/Ctrl-C so callers can abort gracefully.
     """
     if dry_run:
         log_info(f"[dry-run] Would prompt: {message} [y/N]")
@@ -35,12 +49,20 @@ def prompt_version(
     non_interactive: bool = False,
     cli_version: str = "",
 ) -> str:
-    """Interactive version selection with suggestions.
+    """Let the user pick the next release version interactively.
 
-    If cli_version is set, validates and returns it directly.
-    In non-interactive mode without cli_version, raises an error.
+    Shows a numbered menu of suggested bumps (patch / minor / major) plus
+    a "custom" option where the user can type any valid ``X.Y.Z`` string.
 
-    Returns the selected version string (without prefix).
+    Short-circuits:
+
+    - If *cli_version* is provided, validates and returns it immediately
+      (no prompt shown).
+    - If *non_interactive* is ``True`` and no *cli_version* was given,
+      raises ``SystemExit`` because there is no way to choose.
+
+    Returns:
+        The chosen version string **without** the tag prefix.
     """
     if cli_version:
         validate_semver(cli_version)

@@ -39,10 +39,26 @@ _REQUIRED_SOURCE_FIELDS = {
 
 
 def load_manifest(path: str) -> dict:
-    """Parse and validate tools.json.
+    """Read ``tools.json`` from disk, validate its structure, and return it.
 
-    Raises SystemExit on missing file, invalid JSON, or missing required fields.
-    Unknown tool names in toolset lists are flagged as warnings.
+    Validation includes:
+
+    - Every tool must have a ``source`` with a known ``type`` and all
+      required fields for that type (e.g. ``url`` for git, ``path`` for
+      archive/external).
+    - Tool and toolset names are checked for shell-unsafe characters and
+      path separators to prevent injection or traversal.
+    - Dict-format toolsets must have a ``version`` and a ``tools`` mapping
+      where every value is valid semver.
+    - Unknown tool references inside toolsets produce a warning (not an error)
+      so the manifest can be loaded even when a tool is not yet added.
+
+    Returns:
+        The parsed manifest dict with guaranteed ``tools``, ``toolsets``,
+        and ``deploy_base_path`` keys.
+
+    Raises:
+        SystemExit: On missing file, invalid JSON, or validation failure.
     """
     if not os.path.isfile(path):
         log_error(f"Manifest file not found: {path}")
@@ -190,7 +206,12 @@ def load_manifest(path: str) -> dict:
 
 
 def save_manifest(path: str, data: dict) -> None:
-    """Atomically write manifest JSON to disk (tmp + rename)."""
+    """Write the manifest dict back to disk atomically.
+
+    Writes to a temporary file in the same directory first, then does an
+    atomic ``os.replace`` so that a crash mid-write never leaves a
+    truncated ``tools.json``.  Raises ``SystemExit`` on I/O failure.
+    """
     dir_ = os.path.dirname(os.path.abspath(path))
     try:
         fd, tmp_path = tempfile.mkstemp(dir=dir_, suffix=".tmp")
@@ -198,7 +219,7 @@ def save_manifest(path: str, data: dict) -> None:
             with os.fdopen(fd, "w") as f:
                 json.dump(data, f, indent=2)
                 f.write("\n")
-        except Exception:
+        except (OSError, ValueError, TypeError):
             try:
                 os.unlink(tmp_path)
             except OSError:
@@ -211,7 +232,11 @@ def save_manifest(path: str, data: dict) -> None:
 
 
 def get_tool(data: dict, name: str) -> dict:
-    """Return tool entry by name; raises SystemExit if not found."""
+    """Look up a tool by name in the manifest and return its dict.
+
+    Raises ``SystemExit`` with a helpful message listing available tools
+    if *name* is not found.
+    """
     tools = data.get("tools", {})
     if name not in tools:
         available = ", ".join(sorted(tools.keys())) or "(none)"
@@ -223,12 +248,15 @@ def get_tool(data: dict, name: str) -> dict:
 
 
 def set_tool_version(data: dict, name: str, version: str) -> None:
-    """Update the version field for a tool in-place."""
+    """Set the ``version`` field on a tool entry (modifies *data* in place)."""
     data["tools"][name]["version"] = version
 
 
 def get_toolset(data: dict, name: str) -> list | dict:
-    """Return toolset entry by name (list or dict); raises SystemExit if not found."""
+    """Look up a toolset by name.  Returns the raw entry (list or dict).
+
+    Raises ``SystemExit`` if *name* is not found.
+    """
     toolsets = data.get("toolsets", {})
     if name not in toolsets:
         available = ", ".join(sorted(toolsets.keys())) or "(none)"
@@ -240,11 +268,15 @@ def get_toolset(data: dict, name: str) -> list | dict:
 
 
 def get_toolset_tool_versions(data: dict, ts_name: str) -> dict:
-    """Normalize a toolset into {tool_name: version} regardless of format.
+    """Return ``{tool_name: version}`` for every tool in a toolset.
 
-    - Legacy list format: pulls each tool's 'version' field from the manifest.
-    - Dict format: returns the 'tools' mapping directly.
-    Raises SystemExit if toolset not found.
+    Handles both toolset formats transparently:
+
+    - **Dict format** — returns the ``tools`` mapping directly.
+    - **Legacy list** — looks up each tool's current ``version`` field
+      from the manifest (may be ``""`` if not yet deployed).
+
+    Raises ``SystemExit`` if the toolset is not found.
     """
     ts = get_toolset(data, ts_name)
     if isinstance(ts, dict):
@@ -258,7 +290,10 @@ def get_toolset_tool_versions(data: dict, ts_name: str) -> dict:
 
 
 def get_toolset_version(data: dict, ts_name: str) -> str:
-    """Return the toolset's own version string, or '' for legacy list format."""
+    """Return the toolset's own version (e.g. ``"1.0.0"``).
+
+    Returns ``""`` for legacy list-format toolsets (they have no version).
+    """
     ts = get_toolset(data, ts_name)
     if isinstance(ts, dict):
         return ts.get("version", "")
@@ -266,17 +301,23 @@ def get_toolset_version(data: dict, ts_name: str) -> str:
 
 
 def set_tool_available(data: dict, name: str, versions: list) -> None:
-    """Update the available versions list for a tool in-place."""
+    """Set the ``available`` field on a tool entry (modifies *data* in place).
+
+    Called by ``scan`` after querying a source adapter for version lists.
+    """
     data["tools"][name]["available"] = versions
 
 
 def collect_string_vars(data: dict, *scopes: dict) -> dict:
-    """Collect string-valued keys from root through nested scopes (closest wins).
+    """Build a flat ``{key: value}`` dict of user-defined variables for templates.
 
-    Walks *data* (the root manifest dict) first, then each element of *scopes*
-    in order.  Later scopes override earlier ones.  Non-string values (dicts,
-    lists, booleans, numbers) are silently skipped.  All values are stripped of
-    leading/trailing whitespace.
+    Used to resolve ``{{placeholder}}`` expressions in ``install_path`` and
+    ``mf_path`` templates.  Walks the root manifest dict first, then each
+    additional *scope* (e.g. a toolset entry, then a tool entry).  Later
+    scopes override earlier ones so that tool-level vars beat root-level.
+
+    Non-string values (dicts, lists, booleans, numbers) are silently skipped
+    since they cannot appear in path templates.
     """
     merged: dict[str, str] = {}
     for k, v in data.items():
@@ -291,7 +332,11 @@ def collect_string_vars(data: dict, *scopes: dict) -> dict:
 
 
 def resolve_manifest_path(config) -> str:
-    """Resolve tools.json path from config or fall back to cwd/tools.json."""
+    """Return the path to ``tools.json``.
+
+    Uses ``config.tools_manifest`` if set, otherwise defaults to
+    ``./tools.json`` in the current working directory.
+    """
     if config.tools_manifest:
         return config.tools_manifest
     return os.path.join(os.getcwd(), "tools.json")

@@ -68,26 +68,25 @@ def substitute_placeholders(
     deploy_base_path: str = "",
     tool_versions: dict[str, str] | None = None,
 ) -> str:
-    """Replace placeholders in a modulefile template.
+    """Replace ``%PLACEHOLDER%`` tokens in a modulefile template string.
 
-    Placeholders:
-        %VERSION%          - The version being deployed
-        %ROOT%             - The deploy directory root
-        %TOOL_NAME%        - The tool name
-        %DEPLOY_BASE_PATH% - The deploy base path
-        %<tool-name>%      - Per-tool version (from tool_versions dict)
-        %TOOL_LOADS%       - Auto-generated 'module load' block
+    Standard placeholders (always available):
 
-    Args:
-        template: Template string with placeholders.
-        version: Version string (e.g. '1.2.0').
-        root: Deploy root path for this tool version.
-        tool_name: Tool/bundle name.
-        deploy_base_path: Base deploy path.
-        tool_versions: Dict mapping tool names to versions (for toolsets).
+    ==================== ==========================================
+    ``%VERSION%``        Version being deployed (e.g. ``1.2.0``)
+    ``%ROOT%``           Absolute path to the deployed tool version
+    ``%TOOL_NAME%``      Name of the tool or toolset
+    ``%DEPLOY_BASE_PATH%`` Root deploy directory
+    ==================== ==========================================
 
-    Returns:
-        Template with placeholders substituted.
+    Toolset-only placeholders (require *tool_versions*):
+
+    ==================== ==========================================
+    ``%TOOL_LOADS%``     Auto-generated ``module load name/ver`` block
+    ``%<tool-name>%``    Replaced by that tool's pinned version
+    ==================== ==========================================
+
+    Returns the template with all recognised placeholders filled in.
     """
     result = template
     result = result.replace("%VERSION%", version)
@@ -114,9 +113,11 @@ def validate_template_placeholders(
     template: str,
     tool_versions: dict[str, str],
 ) -> None:
-    """Validate that per-tool placeholders in a template reference existing submodules.
+    """Check that every custom ``%name%`` in *template* matches a known tool.
 
-    Raises ValueError if a placeholder references a non-existent submodule.
+    Standard placeholders (``VERSION``, ``ROOT``, etc.) are ignored.
+    Raises ``ValueError`` if a ``%name%`` token does not correspond to any
+    key in *tool_versions*, which usually means a typo in the template.
     """
     # Find all %name% placeholders that aren't standard ones
     standard = {"VERSION", "ROOT", "TOOL_NAME", "DEPLOY_BASE_PATH", "TOOL_LOADS"}
@@ -135,14 +136,17 @@ def resolve_template(
     deploy_dir: str = "",
     config_template_path: str = "",
 ) -> str | None:
-    """Resolve which modulefile template to use.
+    """Decide which modulefile template to use and return its content.
 
-    Priority:
-        1. repo modulefile.tcl (in deploy_dir)
-        2. config MODULEFILE_TEMPLATE path
-        3. None (use default)
+    Checks sources in priority order:
 
-    Returns template content string, or None for default.
+    1. ``modulefile.tcl`` inside the deployed repo (*deploy_dir*) — lets
+       individual tools ship their own template.
+    2. A global template file pointed to by the config
+       (``MODULEFILE_TEMPLATE``).
+    3. ``None`` — signals the caller to fall back to the built-in default.
+
+    Returns the template as a string, or ``None``.
     """
     # Check for modulefile.tcl in the deployed repo
     if deploy_dir:
@@ -168,7 +172,11 @@ def resolve_template(
 
 
 def generate_default_modulefile(tool_name: str, version: str, root: str) -> str:
-    """Generate a default modulefile using the hardcoded template."""
+    """Return a modulefile string using the built-in default template.
+
+    The default template sets up ``conflict``, ``module-whatis``, and
+    prepends ``$root/bin`` to ``PATH``.
+    """
     return DEFAULT_MODULEFILE_TEMPLATE.format(
         tool_name=tool_name,
         version=version,
@@ -184,21 +192,23 @@ def generate_toolset_modulefile(
     template_path: str = "",
     template_content: str | None = None,
 ) -> str:
-    """Generate a toolset modulefile.
+    """Build a modulefile that loads an entire toolset at pinned versions.
 
-    If a custom template is provided, uses placeholder substitution.
-    Otherwise uses the default toolset template.
+    The generated file contains one ``module load <tool>/<version>`` line
+    per tool.  If a custom template is provided (via *template_content* or
+    *template_path*), placeholders are substituted instead.
 
     Args:
-        toolset_name: Toolset name.
-        version: Toolset version.
-        deploy_base_path: Deploy base path.
-        tool_versions: Dict mapping tool names to versions.
-        template_path: Path to custom template file.
-        template_content: Pre-loaded template content (overrides template_path).
+        toolset_name:     Name of the toolset (used in ``module-whatis``).
+        version:          The toolset's own version string.
+        deploy_base_path: Root deploy directory (for ``%DEPLOY_BASE_PATH%``).
+        tool_versions:    ``{tool_name: version}`` mapping.
+        template_path:    Optional path to a custom Tcl template file.
+        template_content: Optional pre-loaded template string (takes priority
+                          over *template_path*).
 
     Returns:
-        Modulefile content string.
+        The complete modulefile content as a string.
     """
     template = template_content
     if template is None and template_path and os.path.isfile(template_path):
@@ -236,13 +246,15 @@ def generate_toolset_modulefile(
 def write_modulefile(
     content: str, mf_path: str, dry_run: bool = False, overwrite: bool = False,
 ) -> None:
-    """Write modulefile content to disk.
+    """Write a modulefile string to disk, creating parent directories as needed.
 
-    Args:
-        content: Modulefile content string.
-        mf_path: Target file path.
-        dry_run: If True, log but don't write.
-        overwrite: If True, replace an existing file instead of erroring.
+    Safety checks before writing:
+
+    - Refuses to follow symlinks (both the file itself and its parent
+      directory) to prevent writing outside the expected tree.
+    - Errors if the file already exists unless *overwrite* is ``True``.
+
+    In dry-run mode, logs what would happen without touching the filesystem.
     """
     if dry_run:
         log_info(f"[dry-run] Would write modulefile to {mf_path}")
@@ -283,14 +295,15 @@ def copy_and_update_modulefile(
     new_version: str,
     dry_run: bool = False,
 ) -> None:
-    """Copy an existing modulefile and update version references.
+    """Create a new modulefile by copying a previous version and updating it.
 
-    Args:
-        source_path: Path to existing modulefile.
-        dest_path: Target path for new modulefile.
-        old_version: Version string to replace.
-        new_version: New version string.
-        dry_run: If True, log but don't write.
+    Reads *source_path*, replaces all occurrences of *old_version* with
+    *new_version* (using word-boundary anchors so ``1.1.0`` inside
+    ``21.1.0`` is not accidentally changed), and writes to *dest_path*.
+
+    This is the preferred path for generating modulefiles because it
+    preserves any manual customisations the operator made to a previous
+    version's modulefile.
     """
     if dry_run:
         log_info(f"[dry-run] Would copy modulefile from {source_path} to "
@@ -331,9 +344,12 @@ def copy_and_update_modulefile(
 
 
 def find_latest_modulefile(mf_dir: str) -> str | None:
-    """Find the latest semver modulefile in a directory.
+    """Find the modulefile with the highest semver name in *mf_dir*.
 
-    Returns full path to the latest modulefile, or None.
+    Modulefile filenames are bare version strings (e.g. ``1.2.3``).
+    Scans the directory, filters to valid semver names, sorts
+    numerically, and returns the full path to the highest one —
+    or ``None`` if the directory is empty or does not exist.
     """
     if not os.path.isdir(mf_dir):
         return None

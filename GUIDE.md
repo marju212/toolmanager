@@ -28,11 +28,13 @@ Managing scientific and engineering tools on shared infrastructure is messy. Too
 
 This is auditable, repeatable, and works well in CI/CD.
 
-**Safe by default.** Dry-run mode on every command. Advisory file locking prevents concurrent deploys. Symlink detection prevents path attacks. External tools are blocked from deploy unless you explicitly `--force`. No files are ever silently overwritten.
+**Safe by default.** Dry-run mode on every command. Advisory file locking (with PID tracking) prevents concurrent deploys. Path traversal protection on template substitution. Symlink detection prevents path attacks. External tools are blocked from deploy unless you explicitly `--force`. No files are ever silently overwritten. Distinct exit codes (2=config, 3=source, 4=deploy) let CI pipelines react to specific failure types.
 
 **No external dependencies.** Python 3.12 stdlib only — no pip, no venv, no network calls beyond git. Runs anywhere Python and git are available.
 
 **No API calls.** No GitLab/GitHub API tokens, no webhooks, no CI runners needed. Everything works through plain git tags and local filesystem operations.
+
+**Configurable timeouts.** All git operations have a default 120-second timeout (configurable via `TOOLMANAGER_GIT_TIMEOUT` env var) so a stalled server cannot hang the process.
 
 ### When to use it
 
@@ -1050,7 +1052,23 @@ deploy.sh scan -n
 
 ---
 
-## Part 10 — Config Reference
+## Part 10 — Exit Codes
+
+`deploy.sh` uses distinct exit codes so CI pipelines can distinguish failure types:
+
+| Code | Category | Examples |
+|---|---|---|
+| `0` | Success | Deploy completed, scan finished, help printed |
+| `1` | General error | Manifest validation failure, modulefile write error |
+| `2` | Config / argument error | Missing `--deploy-path`, invalid `--version`, unknown subcommand |
+| `3` | Source adapter error | Git clone failed, tag not found, `ls-remote` timed out |
+| `4` | Deploy-time error | Lock contention, directory already exists, bootstrap failure |
+
+`release.sh` uses exit code `1` for all errors.
+
+---
+
+## Part 11 — Config Reference
 
 ### All Config Keys
 
@@ -1064,6 +1082,12 @@ deploy.sh scan -n
 | `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template file |
 
 Environment variables are snapshotted at startup — config files cannot override them.
+
+### Runtime Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOOLMANAGER_GIT_TIMEOUT` | `120` | Timeout in seconds for all git subprocess calls. Applies to `_run_git()`, `git ls-remote`, and `git clone`. Set higher on slow networks. |
 
 ### Annotated `.release.conf`
 
@@ -1087,7 +1111,7 @@ Environment variables are snapshotted at startup — config files cannot overrid
 
 ---
 
-## Part 11 — Troubleshooting
+## Part 12 — Troubleshooting
 
 | Problem | Cause | Fix |
 |---|---|---|
@@ -1104,6 +1128,10 @@ Environment variables are snapshotted at startup — config files cannot overrid
 | `Deploy directory already exists` | Already deployed this version | `rm -rf deploy_base_path/tool/version` to reinstall |
 | `Modulefile already exists` | Already deployed this version | `rm mf_path/tool/version` to regenerate |
 | `Bootstrap failed` | Bootstrap command exited non-zero | Check the command; prompted to clean up the deploy |
+| `Another deploy may be in progress (held by PID ...)` | File lock contention | Wait for the other deploy to finish, or remove the stale `.deploy.lock` file |
+| `Timed out listing tags` / `Timed out cloning` | Git server slow or unreachable | Increase `TOOLMANAGER_GIT_TIMEOUT` env var (default: 120s) |
+| `deploy_base_path is not writable` | Directory exists but no write permission | Fix permissions or use `--deploy-path` to point to a writable location |
+| `Resolved path template contains '..'` | Path traversal in `install_path`/`mf_path` template | Remove `..` components from template variables |
 | `No versions available` | Source has no semver tags / source path empty | Push a release tag, or check `source.path` |
 | `tools.json not found` | Manifest path wrong | Pass `--manifest FILE` or set `TOOLS_MANIFEST` |
 | `Tool has no deployed version recorded` | `version` is empty in tools.json | Run `deploy.sh deploy <tool>` first |

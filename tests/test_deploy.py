@@ -32,6 +32,9 @@ from deploy import (
     _resolve_path_template,
     _acquire_deploy_lock,
     _release_deploy_lock,
+    EXIT_CONFIG,
+    EXIT_SOURCE,
+    EXIT_DEPLOY,
 )
 from lib.sources import (
     ArchiveAdapter, ExternalAdapter, SourceError,
@@ -210,7 +213,7 @@ class TestMainDispatch(unittest.TestCase):
     def test_unknown_subcommand_exits(self):
         with self.assertRaises(SystemExit) as ctx:
             self._main(["frobnicate"])
-        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(ctx.exception.code, EXIT_CONFIG)
 
     def test_deploy_unknown_flag_exits(self):
         """Typo'd flag after tool name must error, not be silently ignored."""
@@ -1735,7 +1738,7 @@ class TestDeployExternallyManaged(unittest.TestCase):
         config = self._config()
         with self.assertRaises(SystemExit) as ctx:
             cmd_deploy("ext-tool", "1.1.0", _make_args(), config)
-        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(ctx.exception.code, EXIT_CONFIG)
 
     def test_deploy_allowed_with_force(self):
         config = self._config()
@@ -1750,7 +1753,7 @@ class TestDeployExternallyManaged(unittest.TestCase):
         config = self._config()
         with self.assertRaises(SystemExit) as ctx:
             cmd_upgrade("ext-tool", _make_args(), config)
-        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(ctx.exception.code, EXIT_CONFIG)
 
     def test_upgrade_allowed_with_force(self):
         config = self._config()

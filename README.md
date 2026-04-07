@@ -11,7 +11,7 @@ Two scripts, each handling one concern:
 | `release.sh` | Developers | Version selection, annotated tag on main, changelog |
 | `deploy.sh` | DevOps | Manifest-driven deploy, version scanning, toolset modulefiles |
 
-**Technology:** Python 3.12, standard library only. Thin Bash wrappers call the Python scripts.
+**Technology:** Python 3.12+, standard library only. Thin Bash wrappers call the Python scripts.
 
 ---
 
@@ -152,6 +152,26 @@ Reads the named toolset from `tools.json`, collects current deployed versions of
 | `--force` | Override deploy protection for externally managed tools |
 | `--help`, `-h` | Show help (also works per subcommand) |
 
+#### `apply` — Declarative deploy from toolset version pins
+
+```bash
+deploy.sh apply                          # deploy all missing tool versions
+deploy.sh apply --toolset science        # only one toolset
+deploy.sh apply --dry-run                # preview
+```
+
+Reads dict-format toolsets from `tools.json`, deploys every tool+version pair not already on disk, and writes toolset modulefiles. This is the "reconcile" step for a GitOps workflow.
+
+### Exit Codes
+
+| Code | Meaning |
+|---|---|
+| `0` | Success |
+| `1` | General error (manifest validation, modulefile write, etc.) |
+| `2` | Configuration or argument error (bad flag, missing path, invalid version) |
+| `3` | Source adapter error (git clone failed, tag not found, timeout) |
+| `4` | Deploy-time error (lock contention, directory exists, bootstrap failure) |
+
 ### tools.json Schema
 
 ```json
@@ -243,6 +263,12 @@ Config files use `KEY=VALUE` format with `#` comments and optional quotes.
 | `MF_BASE_PATH` | `MF_BASE_PATH` | *(none)* | Override modulefile directory |
 | `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template |
 
+### Environment Variables (runtime)
+
+| Variable | Default | Description |
+|---|---|---|
+| `TOOLMANAGER_GIT_TIMEOUT` | `120` | Seconds before git operations are killed (applies to all git subprocess calls) |
+
 ---
 
 ## Architecture
@@ -250,16 +276,16 @@ Config files use `KEY=VALUE` format with `#` comments and optional quotes.
 ```
 src/
 ├── lib/                       # Shared Python library
-│   ├── config.py              # Multi-level config loading
-│   ├── git.py                 # Git operations via subprocess
-│   ├── log.py                 # Color-coded stderr logging
-│   ├── semver.py              # Semver validation + suggestions
-│   ├── modulefile.py          # Modulefile generation + templates
-│   ├── manifest.py            # tools.json read/write/validation
-│   ├── sources.py             # GitAdapter, ArchiveAdapter, ExternalAdapter
-│   └── prompt.py              # Interactive prompts
-├── release.py                 # Release tool
-└── deploy.py                  # Deploy tool (subcommand-driven)
+│   ├── config.py              # Multi-level config loading (file → env → CLI)
+│   ├── git.py                 # Git operations with configurable timeout
+│   ├── log.py                 # Color-coded stderr logging (info/warn/error/success)
+│   ├── semver.py              # Strict X.Y.Z validation + bump suggestions
+│   ├── modulefile.py          # Modulefile generation, templates, placeholder substitution
+│   ├── manifest.py            # tools.json read/write/validation (atomic writes)
+│   ├── sources.py             # GitAdapter, ArchiveAdapter, ExternalAdapter (with timeouts)
+│   └── prompt.py              # Interactive y/n and version prompts (auto-skip in CI)
+├── release.py                 # Release tool: tag from main + changelog
+└── deploy.py                  # Deploy tool: subcommand-driven with file locking
 
 scripts/
 ├── release.sh                 # Thin wrapper → src/release.py

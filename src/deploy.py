@@ -59,6 +59,11 @@ from lib.modulefile import (
 from lib.prompt import confirm
 
 
+# Exit codes
+EXIT_CONFIG = 2   # configuration / argument errors
+EXIT_SOURCE = 3   # git / source adapter errors
+EXIT_DEPLOY = 4   # deploy-time errors (bootstrap, modulefile, lock)
+
 USAGE = """\
 Usage: deploy.py <subcommand> [OPTIONS] [ARGS]
 
@@ -124,14 +129,17 @@ def _resolve_path_template(
     version: str,
     user_vars: dict[str, str] | None = None,
 ) -> str:
-    """Resolve ``{{...}}`` placeholders in a path template.
+    """Replace ``{{key}}`` placeholders in an ``install_path`` or ``mf_path`` template.
 
-    *user_vars* carries custom string-valued keys collected from the manifest
-    via :func:`collect_string_vars`.  Built-in variables (``toolname`` and
-    ``version``) always take precedence over user-defined ones.
+    Built-in variables (``{{toolname}}`` and ``{{version}}``) are always
+    available and take priority over user-defined ones.  Custom variables
+    come from ``collect_string_vars()`` — typically root-level and
+    tool-level string fields in ``tools.json``.
 
-    Raises :class:`SystemExit` if any ``{{...}}`` placeholders remain
-    unresolved after substitution.
+    After substitution the result is normalised (``os.path.normpath``) and
+    checked for ``..`` components to prevent path-traversal attacks.
+
+    Raises ``SystemExit`` if any ``{{...}}`` placeholders remain unresolved.
     """
     merged = dict(user_vars) if user_vars else {}
     merged["toolname"] = tool_name
@@ -151,26 +159,39 @@ def _resolve_path_template(
             f"Unresolved placeholders in path template: "
             f"{', '.join('{{' + p + '}}' for p in unresolved)}"
         )
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG)
 
-    return result
+    # Reject path traversal components injected via user variables
+    normalized = os.path.normpath(result)
+    if ".." in normalized.split(os.sep):
+        log_error(
+            f"Resolved path template contains '..': {result}  "
+            f"— path traversal is not allowed."
+        )
+        raise SystemExit(EXIT_CONFIG)
+
+    return normalized
 
 
-def _check_no_symlink(path: str, label: str) -> None:
-    """Abort if *path* or any ancestor inside the deploy tree is a symlink."""
-    p = path
-    while p and p != "/":
-        if os.path.islink(p):
-            log_error(
-                f"{label} path contains a symlink: {p}  "
-                f"— refusing to continue."
-            )
-            raise SystemExit(1)
-        p = os.path.dirname(p)
+def _validate_deploy_base_path(path: str, dry_run: bool = False) -> None:
+    """Validate deploy_base_path is set, absolute, and writable (unless dry-run)."""
+    if not path:
+        log_error(
+            "No deploy base path configured. "
+            "Set 'deploy_base_path' in tools.json or pass --deploy-path."
+        )
+        raise SystemExit(EXIT_CONFIG)
+    if not os.path.isabs(path):
+        log_error(f"deploy_base_path must be an absolute path: {path}")
+        raise SystemExit(EXIT_CONFIG)
+    if not dry_run and os.path.isdir(path) and not os.access(path, os.W_OK):
+        log_error(f"deploy_base_path is not writable: {path}")
+        raise SystemExit(EXIT_CONFIG)
+
 
 
 def _is_inside(path: str, base: str) -> bool:
-    """Return True if *path* resolves to a location inside *base*."""
+    """Return ``True`` if the real (symlink-resolved) *path* is inside *base*."""
     real_path = os.path.realpath(path)
     real_base = os.path.realpath(base)
     return real_path.startswith(real_base + os.sep) or real_path == real_base
@@ -184,10 +205,12 @@ def _safe_cleanup(
     dry_run: bool,
     non_interactive: bool,
 ) -> None:
-    """Remove a deploy directory only if it is safe to do so.
+    """Offer to remove a failed deploy directory, with safety guardrails.
 
-    Refuses to remove the source version directory itself or any path
-    that resolves outside deploy_base_path.
+    Will **not** remove the directory if it is the external source version
+    dir itself (that would delete upstream files) or if it resolves outside
+    ``deploy_base_path`` (prevents accidental ``rm -rf /``).  In interactive
+    mode, asks the operator for confirmation before deleting.
     """
     if dry_run or not os.path.isdir(deploy_root):
         return
@@ -219,7 +242,10 @@ _active_lock_path = None
 
 def _lock_signal_handler(signum, frame):
     """Clean up lock file on SIGTERM/SIGINT before exiting."""
-    _release_deploy_lock_if_active()
+    try:
+        _release_deploy_lock_if_active()
+    except Exception:
+        pass
     sys.exit(128 + signum)
 
 
@@ -233,10 +259,14 @@ def _release_deploy_lock_if_active():
 
 
 def _acquire_deploy_lock(tool_name: str, base_path: str) -> int:
-    """Acquire an advisory file lock for deploying a tool.
+    """Acquire a per-tool file lock so only one deploy runs at a time.
 
-    Returns (file_descriptor, lock_path).  Warns if the lock file
-    appears stale (mtime older than _LOCK_STALE_SECONDS).
+    Creates ``<base_path>/<tool_name>/.deploy.lock``, acquires an
+    exclusive ``flock``, writes the current PID, and registers a signal
+    handler to clean up on SIGTERM/SIGINT.
+
+    Returns ``(file_descriptor, lock_path)``.  Warns if the lock file's
+    mtime is older than ``_LOCK_STALE_SECONDS`` (may indicate a dead process).
     """
     global _active_lock_fd, _active_lock_path
     lock_dir = os.path.join(base_path, tool_name)
@@ -259,15 +289,25 @@ def _acquire_deploy_lock(tool_name: str, base_path: str) -> int:
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
+        # Try to read holder PID before closing
+        holder_pid = ""
+        try:
+            content = os.pread(fd, 64, 0).decode().strip()
+            if content:
+                holder_pid = f" (held by PID {content})"
+        except OSError:
+            pass
         os.close(fd)
         log_error(
-            f"Another deploy of {tool_name} may be in progress "
+            f"Another deploy of {tool_name} may be in progress{holder_pid} "
             f"(lock: {lock_path})"
         )
-        raise SystemExit(1)
+        raise SystemExit(EXIT_DEPLOY)
 
-    # Update mtime so staleness detection works for the next caller
+    # Write our PID and update mtime so staleness detection works
     try:
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, str(os.getpid()).encode(), 0)
         os.utime(lock_path)
     except OSError:
         pass
@@ -282,7 +322,7 @@ def _acquire_deploy_lock(tool_name: str, base_path: str) -> int:
 
 
 def _release_deploy_lock(fd: int, lock_path: str) -> None:
-    """Release an advisory deploy lock and remove the lock file."""
+    """Release the flock, close the file descriptor, and delete the lock file."""
     global _active_lock_fd, _active_lock_path
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -303,10 +343,14 @@ def run_bootstrap(
     tool_name: str,
     dry_run: bool = False,
 ) -> bool:
-    """Run an explicit bootstrap command in the deploy directory.
+    """Execute a user-defined bootstrap command inside the deploy directory.
 
-    Returns True if bootstrap ran successfully.
-    Returns False if bootstrap failed.
+    The command runs via ``sh -c`` with environment variables
+    ``INSTALL_PATH``, ``TOOL_VERSION``, and ``TOOL_NAME`` set so the
+    script can locate itself.
+
+    Returns ``True`` on success, ``False`` if the command exits non-zero.
+    In dry-run mode, logs the command and returns ``True`` without running it.
     """
     if not command:
         return True
@@ -323,7 +367,7 @@ def run_bootstrap(
 
     try:
         subprocess.run(
-            command, shell=True, cwd=deploy_dir, check=True, env=env,
+            ["sh", "-c", command], cwd=deploy_dir, check=True, env=env,
         )
         log_success(f"Bootstrap completed: {command}")
         return True
@@ -342,7 +386,12 @@ def _write_tool_modulefile(
     mf_path: str | None = None,
     overwrite: bool = False,
 ) -> None:
-    """Write modulefile for a single deployed tool."""
+    """Write or copy a modulefile for a single deployed tool version.
+
+    Tries to copy the latest existing modulefile and update version
+    references (preserves manual edits).  Falls back to a template from
+    the repo, the config, or the built-in default.
+    """
     if mf_path:
         mf_file = mf_path
         mf_dir = os.path.dirname(mf_file)
@@ -384,7 +433,11 @@ def _prompt_version_interactive(
     current_version: str,
     available: list,
 ) -> str:
-    """Present a numbered version menu and return the chosen version string."""
+    """Show a numbered version menu (up to 10 latest) and let the user pick.
+
+    Accepts a list index, a literal version string, or Enter for latest.
+    Returns the chosen version string.
+    """
     total = len(available)
     shown = available[-10:]  # show up to 10 most recent
 
@@ -453,10 +506,11 @@ def _prompt_version_interactive(
 
 
 def _apply_manifest_deploy_base(config, data: dict) -> None:
-    """Fall back to manifest deploy_base_path when CLI did not set one.
+    """Use the manifest's ``deploy_base_path`` when no CLI override was given.
 
-    Root-level custom string vars are resolved in the path.  ``{{toolname}}``
-    and ``{{version}}`` are **not** available at this scope.
+    Resolves ``{{key}}`` placeholders using root-level string vars from
+    the manifest.  Note: ``{{toolname}}`` and ``{{version}}`` are **not**
+    available here because this runs before any specific tool is selected.
     """
     if not config.deploy_base_path:
         manifest_path = data.get("deploy_base_path", "")
@@ -485,7 +539,11 @@ def cmd_deploy(
     args: dict,
     config,
 ) -> None:
-    """Deploy subcommand: deploy a tool version and update tools.json."""
+    """Deploy a single tool version: fetch source, run bootstrap, write modulefile, update manifest.
+
+    This is the core deploy workflow.  Acquires a per-tool file lock to
+    prevent concurrent deploys of the same tool.
+    """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
     tool_entry = get_tool(data, tool_name)
@@ -496,20 +554,9 @@ def cmd_deploy(
             f"Tool '{tool_name}' is externally managed (source type: external). "
             f"Use --force to deploy anyway."
         )
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG)
 
-    if not config.deploy_base_path:
-        log_error(
-            "No deploy base path configured. "
-            "Set 'deploy_base_path' in tools.json or pass --deploy-path."
-        )
-        raise SystemExit(1)
-
-    if not os.path.isabs(config.deploy_base_path):
-        log_error(
-            f"deploy_base_path must be an absolute path: {config.deploy_base_path}"
-        )
-        raise SystemExit(1)
+    _validate_deploy_base_path(config.deploy_base_path, args["dry_run"])
 
     source_type = tool_entry["source"]["type"]
     adapter = build_adapter(tool_entry, tag_prefix=config.tag_prefix)
@@ -523,7 +570,7 @@ def cmd_deploy(
             validate_semver(version_arg)
         except ValueError:
             log_error(f"Invalid version: '{version_arg}' (expected X.Y.Z)")
-            raise SystemExit(1)
+            raise SystemExit(EXIT_CONFIG)
 
         # For git sources, validate the tag exists before attempting a clone
         if source_type == "git":
@@ -532,7 +579,7 @@ def cmd_deploy(
                 available = adapter.get_available_versions()
             except SourceError as e:
                 log_error(str(e))
-                raise SystemExit(1)
+                raise SystemExit(EXIT_SOURCE)
             if version_arg not in available:
                 avail_str = (
                     ", ".join(available[-5:]) if available else "(none)"
@@ -551,11 +598,11 @@ def cmd_deploy(
             available = adapter.get_available_versions()
         except SourceError as e:
             log_error(str(e))
-            raise SystemExit(1)
+            raise SystemExit(EXIT_SOURCE)
 
         if not available:
             log_error(f"No versions available for tool '{tool_name}'")
-            raise SystemExit(1)
+            raise SystemExit(EXIT_SOURCE)
 
         if non_interactive:
             version = available[-1]
@@ -643,13 +690,13 @@ def cmd_deploy(
                     f"Deploy target is a symlink: {deploy_target}  "
                     f"— refusing to continue."
                 )
-                raise SystemExit(1)
+                raise SystemExit(EXIT_DEPLOY)
             if os.path.isdir(deploy_target):
                 log_error(f"Deploy directory already exists: {deploy_target}")
                 log_error(
                     f"  To reinstall, remove it first: rm -rf {deploy_target}"
                 )
-                raise SystemExit(1)
+                raise SystemExit(EXIT_DEPLOY)
         # ------------------------------------------------------------- deploy
         try:
             if source_type == "archive":
@@ -665,7 +712,7 @@ def cmd_deploy(
                 )
         except SourceError as e:
             log_error(str(e))
-            raise SystemExit(1)
+            raise SystemExit(EXIT_SOURCE)
 
         # --------------------------------------------------------- bootstrap
         # Guard: never offer to remove the external source version dir itself
@@ -678,7 +725,7 @@ def cmd_deploy(
                 _safe_cleanup(deploy_root, source_version_dir,
                               config.deploy_base_path, "failed bootstrap",
                               dry_run, non_interactive)
-                raise SystemExit(1)
+                raise SystemExit(EXIT_DEPLOY)
         elif bootstrap_cmd and dry_run:
             run_bootstrap(bootstrap_cmd, deploy_root, version, tool_name, dry_run=True)
 
@@ -774,7 +821,12 @@ def _compare_versions(current: str, available: list) -> tuple:
 
 
 def cmd_scan(args: dict, config) -> None:
-    """Scan subcommand: check all tools for newer versions."""
+    """Query every tool's source for available versions and print an upgrade table.
+
+    Persists discovered versions to the manifest's ``available`` field.
+    In interactive mode, offers to upgrade selected tools.  Also
+    auto-discovers untracked tool directories on shared disks.
+    """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
     _apply_manifest_deploy_base(config, data)
@@ -993,7 +1045,10 @@ def cmd_scan(args: dict, config) -> None:
 
 
 def cmd_upgrade(tool_name: str, args: dict, config) -> None:
-    """Upgrade subcommand: deploy the latest available version."""
+    """Shortcut: find the latest available version and deploy it.
+
+    Does nothing if the tool is already at the latest version.
+    """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
     _apply_manifest_deploy_base(config, data)
@@ -1004,18 +1059,18 @@ def cmd_upgrade(tool_name: str, args: dict, config) -> None:
             f"Tool '{tool_name}' is externally managed (source type: external). "
             f"Use --force to upgrade anyway."
         )
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG)
 
     adapter = build_adapter(tool_entry, tag_prefix=config.tag_prefix)
     try:
         available = adapter.get_available_versions()
     except SourceError as e:
         log_error(str(e))
-        raise SystemExit(1)
+        raise SystemExit(EXIT_SOURCE)
 
     if not available:
         log_error(f"No versions available for tool '{tool_name}'")
-        raise SystemExit(1)
+        raise SystemExit(EXIT_SOURCE)
 
     latest = available[-1]
     current = tool_entry.get("version", "")
@@ -1029,7 +1084,11 @@ def cmd_upgrade(tool_name: str, args: dict, config) -> None:
 
 
 def cmd_toolset(name: str, version: str, args: dict, config) -> None:
-    """Toolset subcommand: write modulefile for a named toolset."""
+    """Write a combined modulefile that ``module load``s all tools in a toolset.
+
+    Reads tool versions from the manifest (dict or legacy list format)
+    and generates a single modulefile at ``<mf_base>/<name>/<version>``.
+    """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
     _apply_manifest_deploy_base(config, data)
@@ -1086,7 +1145,12 @@ def cmd_toolset(name: str, version: str, args: dict, config) -> None:
 
 
 def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
-    """Apply subcommand: deploy all tool versions referenced by toolsets."""
+    """Declarative deploy: reconcile disk state with toolset version pins.
+
+    Reads dict-format toolsets, checks which tool+version pairs are
+    already deployed on disk, deploys the missing ones, and writes
+    toolset modulefiles.  This is the GitOps "reconcile" step.
+    """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
     _apply_manifest_deploy_base(config, data)
@@ -1094,18 +1158,7 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
     dry_run = args["dry_run"]
     force = args["force"]
 
-    if not config.deploy_base_path:
-        log_error(
-            "No deploy base path configured. "
-            "Set 'deploy_base_path' in tools.json or pass --deploy-path."
-        )
-        raise SystemExit(1)
-
-    if not os.path.isabs(config.deploy_base_path):
-        log_error(
-            f"deploy_base_path must be an absolute path: {config.deploy_base_path}"
-        )
-        raise SystemExit(1)
+    _validate_deploy_base_path(config.deploy_base_path, dry_run)
 
     toolsets = data.get("toolsets", {})
     if toolset_filter:
@@ -1189,12 +1242,6 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
             deploy_target = os.path.join(
                 tool_entry["source"]["path"], version
             )
-
-        # Quick pre-lock check (authoritative check is inside the lock)
-        if os.path.isdir(deploy_target) and not os.path.islink(deploy_target):
-            log_info(f"Already deployed: {tool_name} {version}")
-            skipped_count += 1
-            continue
 
         # Deploy
         adapter = build_adapter(tool_entry, tag_prefix=config.tag_prefix)
@@ -1321,10 +1368,11 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
 
 
 def parse_global_args(argv: list) -> tuple:
-    """Parse global flags, returning (remaining_args, global_args_dict).
+    """Strip global flags from *argv* and return ``(remaining, args_dict)``.
 
-    --help / -h are intentionally left in remaining so that subcommand
-    dispatch can print subcommand-specific help text.
+    Global flags (``--dry-run``, ``--config``, ``--manifest``, etc.) are
+    consumed here.  ``--help`` / ``-h`` are left in *remaining* so that
+    subcommand dispatch can print the right help text.
     """
     global_args = {
         "dry_run": False,
@@ -1346,25 +1394,25 @@ def parse_global_args(argv: list) -> tuple:
             i += 1
             if i >= len(argv):
                 log_error("--config requires a file path")
-                raise SystemExit(1)
+                raise SystemExit(EXIT_CONFIG)
             global_args["config_file"] = argv[i]
         elif arg == "--manifest":
             i += 1
             if i >= len(argv):
                 log_error("--manifest requires a file path")
-                raise SystemExit(1)
+                raise SystemExit(EXIT_CONFIG)
             global_args["cli_manifest"] = argv[i]
         elif arg == "--deploy-path":
             i += 1
             if i >= len(argv):
                 log_error("--deploy-path requires a path")
-                raise SystemExit(1)
+                raise SystemExit(EXIT_CONFIG)
             global_args["cli_deploy_path"] = argv[i]
         elif arg == "--mf-path":
             i += 1
             if i >= len(argv):
                 log_error("--mf-path requires a path")
-                raise SystemExit(1)
+                raise SystemExit(EXIT_CONFIG)
             global_args["cli_mf_path"] = argv[i]
         elif arg in ("--non-interactive", "-n"):
             global_args["non_interactive"] = True
@@ -1378,10 +1426,10 @@ def parse_global_args(argv: list) -> tuple:
 
 
 def _parse_subcommand_version(sub_remaining: list) -> tuple:
-    """Parse --version from sub-command remaining args; return (version, rest).
+    """Extract ``--version <val>`` from subcommand args.
 
-    rest contains any args that were not --version <val>.  Callers should
-    reject non-empty rest as unexpected arguments.
+    Returns ``(version_string, leftover_args)``.  Callers should reject
+    non-empty *leftover_args* as unexpected arguments.
     """
     version = ""
     rest = []
@@ -1391,7 +1439,7 @@ def _parse_subcommand_version(sub_remaining: list) -> tuple:
             i += 1
             if i >= len(sub_remaining):
                 log_error("--version requires a value")
-                raise SystemExit(1)
+                raise SystemExit(EXIT_CONFIG)
             version = sub_remaining[i]
         else:
             rest.append(sub_remaining[i])
@@ -1412,7 +1460,7 @@ def main(argv: list = None) -> None:
     if not remaining:
         log_error("No subcommand given.")
         print(USAGE)
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG)
 
     subcommand = remaining[0]
     sub_remaining = remaining[1:]
@@ -1427,7 +1475,7 @@ def main(argv: list = None) -> None:
     from lib.git import get_repo_root
     try:
         repo_root = get_repo_root()
-    except Exception:
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         repo_root = ""
 
     config = load_config(
@@ -1542,7 +1590,7 @@ def main(argv: list = None) -> None:
     else:
         log_error(f"Unknown subcommand: {subcommand}")
         print(USAGE)
-        raise SystemExit(1)
+        raise SystemExit(EXIT_CONFIG)
 
 
 if __name__ == "__main__":
