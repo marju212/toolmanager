@@ -139,6 +139,16 @@ deploy.sh toolset science --version 1.0.0
 
 Reads the named toolset from `tools.json`, collects current deployed versions of all member tools, and writes a combined modulefile that loads them all.
 
+#### `apply` — Declarative deploy from toolset version pins
+
+```bash
+deploy.sh apply                          # deploy all missing tool versions
+deploy.sh apply --toolset science        # only one toolset
+deploy.sh apply --dry-run                # preview
+```
+
+Reads dict-format toolsets from `tools.json`, deploys every tool+version pair not already on disk, and writes toolset modulefiles. This is the "reconcile" step for a GitOps workflow.
+
 ### Global Options (all subcommands)
 
 | Option | Description |
@@ -151,16 +161,6 @@ Reads the named toolset from `tools.json`, collects current deployed versions of
 | `--non-interactive`, `-n` | Auto-confirm all prompts |
 | `--force` | Override deploy protection for externally managed tools |
 | `--help`, `-h` | Show help (also works per subcommand) |
-
-#### `apply` — Declarative deploy from toolset version pins
-
-```bash
-deploy.sh apply                          # deploy all missing tool versions
-deploy.sh apply --toolset science        # only one toolset
-deploy.sh apply --dry-run                # preview
-```
-
-Reads dict-format toolsets from `tools.json`, deploys every tool+version pair not already on disk, and writes toolset modulefiles. This is the "reconcile" step for a GitOps workflow.
 
 ### Exit Codes
 
@@ -177,20 +177,26 @@ Reads dict-format toolsets from `tools.json`, deploys every tool+version pair no
 ```json
 {
   "deploy_base_path": "/opt/software",
+  "app_root": "custom/apps",
   "tools": {
     "my-tool": {
       "version": "1.2.0",
+      "available": ["1.0.0", "1.1.0", "1.2.0"],
       "source": {
         "type": "git",
         "url": "git@gitlab.com:group/my-tool.git"
-      }
+      },
+      "bootstrap": "./install.sh",
+      "install_path": "{{app_root}}/{{toolname}}/{{version}}",
+      "mf_path": "modulefiles/{{toolname}}/{{version}}"
     },
     "packaged-tool": {
       "version": "3.0.0",
       "source": {
         "type": "archive",
         "path": "/nfs/share/packaged-tool"
-      }
+      },
+      "flatten_archive": false
     },
     "matlab": {
       "version": "2024.1.0",
@@ -208,7 +214,8 @@ Reads dict-format toolsets from `tools.json`, deploys every tool+version pair no
         "packaged-tool": "3.0.0",
         "matlab": "2024.1.0"
       }
-    }
+    },
+    "legacy-suite": ["my-tool", "packaged-tool"]
   }
 }
 ```
@@ -219,19 +226,56 @@ Reads dict-format toolsets from `tools.json`, deploys every tool+version pair no
 |---|---|---|
 | `deploy_base_path` | `"/"` | Default root for deployments; overridden by `--deploy-path` |
 | `tools` | `{}` | Tool definitions |
-| `toolsets` | `{}` | Named lists of tools for combined modulefiles |
+| `toolsets` | `{}` | Named groups of tools for combined modulefiles |
+| *custom string keys* | — | Any additional string field at root level becomes a template variable (e.g. `"app_root": "custom/apps"` → `{{app_root}}`). Non-string values are ignored. |
 
 #### Per-tool fields
 
 | Field | Required | Description |
 |---|---|---|
-| `source` | Yes | Source config: `{"type": "git", "url": "..."}`, `{"type": "archive", "path": "..."}`, or `{"type": "external", "path": "..."}` |
+| `source` | Yes | Source definition (see **Source types** below) |
 | `version` | No | Current deployed version (updated automatically on deploy) |
-| `available` | No | List of available versions (populated by `scan`) |
-| `install_path` | No | Custom deploy path; relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` |
-| `mf_path` | No | Custom modulefile path; relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` |
-| `bootstrap` | No | Shell command to run after deploy |
+| `available` | No | List of available version strings (populated by `scan`) |
+| `install_path` | No | Custom deploy path; relative paths resolve against `deploy_base_path`. Supports `{{toolname}}`, `{{version}}`, and any custom string variables defined at root or tool level. |
+| `mf_path` | No | Custom modulefile path; relative paths resolve against `deploy_base_path`. Supports the same placeholders as `install_path`. |
+| `bootstrap` | No | Shell command to run after deploy via `sh -c`. Environment variables `INSTALL_PATH`, `TOOL_VERSION`, and `TOOL_NAME` are set automatically. |
 | `flatten_archive` | No | For archive sources: flatten single-root directories after extraction (default: `true`) |
+| *custom string keys* | No | Any additional string field at tool level becomes a template variable, overriding root-level variables of the same name. |
+
+#### Source types
+
+| Type | Required fields | Description |
+|---|---|---|
+| `git` | `url` | Git repository URL. Clones the version tag on deploy. |
+| `archive` | `path` | Directory containing version subdirectories with archive files (`.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tgz`, `.zip`). Extracted on deploy. |
+| `external` | `path` | Directory containing version subdirectories. No files are copied — tool is assumed already installed. Deploy and upgrade blocked unless `--force` is used. |
+
+#### Toolset formats
+
+Toolsets support two formats:
+
+**Dict format** (version-pinned, required for `apply`):
+
+```json
+"science": {
+  "version": "1.0.0",
+  "tools": {
+    "my-tool": "1.2.0",
+    "packaged-tool": "3.0.0"
+  }
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `version` | Yes | The toolset's own version (must be valid semver X.Y.Z) |
+| `tools` | Yes | Mapping of tool names to pinned version strings (each must be valid semver) |
+
+**Legacy list format** (uses each tool's current `version` from the manifest):
+
+```json
+"legacy-suite": ["my-tool", "packaged-tool"]
+```
 
 ### Deploy Directory Structure
 

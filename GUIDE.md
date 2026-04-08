@@ -111,24 +111,46 @@ Create a `tools.json` file describing your tools. The path defaults to `tools.js
 ```json
 {
   "deploy_base_path": "/opt/software",
+  "app_root": "custom/apps",
   "tools": {
     "my-tool": {
       "version": "",
+      "available": [],
       "source": {
         "type": "git",
         "url": "git@gitlab.com:group/my-tool.git"
-      }
+      },
+      "bootstrap": "bash install.sh",
+      "install_path": "{{app_root}}/{{toolname}}/{{version}}",
+      "mf_path": "modulefiles/{{toolname}}/{{version}}"
     },
     "another-tool": {
       "version": "",
+      "available": [],
       "source": {
         "type": "archive",
         "path": "/nfs/share/another-tool"
+      },
+      "flatten_archive": false
+    },
+    "matlab": {
+      "version": "2024.1.0",
+      "source": {
+        "type": "external",
+        "path": "/opt/external/matlab"
       }
     }
   },
   "toolsets": {
-    "science": ["my-tool", "another-tool"]
+    "science": {
+      "version": "1.0.0",
+      "tools": {
+        "my-tool": "1.0.0",
+        "another-tool": "2.0.0",
+        "matlab": "2024.1.0"
+      }
+    },
+    "legacy-suite": ["my-tool", "another-tool"]
   }
 }
 ```
@@ -140,6 +162,7 @@ Create a `tools.json` file describing your tools. The path defaults to `tools.js
 | `deploy_base_path` | `"/"` | Default root directory for deployments and modulefiles. Overridden by `--deploy-path`. |
 | `tools` | `{}` | Tool definitions (see below) |
 | `toolsets` | `{}` | Named groupings of tools — legacy list format or dict format with version pins |
+| *custom string keys* | — | Any additional string field at root level becomes a template variable (e.g. `"app_root": "custom/apps"` → `{{app_root}}`). Non-string values are ignored. |
 
 #### Per-tool fields
 
@@ -147,12 +170,12 @@ Create a `tools.json` file describing your tools. The path defaults to `tools.js
 |---|---|---|---|
 | `source` | Yes | object | Source definition (see source types below) |
 | `version` | No | string | Current deployed version — updated automatically on deploy |
-| `available` | No | list | All available versions — populated by `scan` |
-| ~~`deploy`~~ | — | — | **Removed.** Use source type `"external"` instead (see Part 6). |
-| `install_path` | No | string | Custom deploy path. Relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` placeholders. |
-| `mf_path` | No | string | Custom modulefile path. Relative paths resolve against `deploy_base_path`. Supports `{{toolname}}` and `{{version}}` placeholders. |
-| `bootstrap` | No | string | Shell command to run after deployment completes |
+| `available` | No | list | All available version strings — populated by `scan` |
+| `install_path` | No | string | Custom deploy path. Relative paths resolve against `deploy_base_path`. Supports `{{toolname}}`, `{{version}}`, and any custom string variables defined at root or tool level. |
+| `mf_path` | No | string | Custom modulefile path. Relative paths resolve against `deploy_base_path`. Supports the same placeholders as `install_path`. |
+| `bootstrap` | No | string | Shell command to run after deploy via `sh -c`. Environment variables `INSTALL_PATH`, `TOOL_VERSION`, and `TOOL_NAME` are set automatically (see Part 4). |
 | `flatten_archive` | No | boolean | For archive sources: flatten single-root directories after extraction (default: `true`) |
+| *custom string keys* | No | string | Any additional string field at tool level becomes a template variable, overriding root-level variables of the same name. |
 
 #### Source types
 
@@ -801,6 +824,9 @@ Both `install_path` and `mf_path` support:
 |---|---|
 | `{{toolname}}` | Tool name |
 | `{{version}}` | Version being deployed |
+| `{{<key>}}` | Any custom string variable defined at root or tool level in `tools.json` (e.g. `{{app_root}}`) |
+
+Variables are resolved in priority order: root-level strings → tool-level strings → built-ins (`toolname`, `version`). Later values override earlier ones, so a tool-level variable beats a root-level variable of the same name.
 
 ---
 
