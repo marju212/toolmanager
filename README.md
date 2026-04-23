@@ -95,6 +95,20 @@ deploy.sh <subcommand> [OPTIONS]
 
 ### Subcommands
 
+| Subcommand | Purpose |
+|---|---|
+| `deploy <tool> [--version X.Y.Z]` | Deploy a specific version |
+| `scan` | Check every tool for newer versions |
+| `upgrade <tool>` | Deploy the latest available version |
+| `toolset <name> [--version X.Y.Z]` | Write a toolset modulefile |
+| `toolset list` | List every toolset in the manifest |
+| `toolset show <name>` | Show a toolset's contents and deploy status |
+| `toolset bump <name> --tool NAME=VERSION [...]` | Update a dict toolset's pins |
+| `toolset migrate <name> [--version X.Y.Z]` | Convert a legacy list toolset to dict |
+| `apply [--toolset <name>]` | Reconcile disk state with toolset version pins |
+| `prune <tool> --keep N` | Remove old deployed versions (keeps newest N + all pinned) |
+| `remove <tool> --version X.Y.Z` | Remove one deployed version (refuses pinned without `--force`) |
+
 #### `deploy` — Deploy a specific version
 
 ```bash
@@ -149,6 +163,43 @@ deploy.sh apply --dry-run                # preview
 
 Reads dict-format toolsets from `tools.json`, deploys every tool+version pair not already on disk, and writes toolset modulefiles. This is the "reconcile" step for a GitOps workflow.
 
+After each successful deploy, `apply` updates `tools[<name>].version` in the manifest to the highest version it placed on disk for that tool — so a later `scan` shows an accurate "current" version.
+
+#### `toolset list` / `toolset show` — Inspect toolsets
+
+```bash
+deploy.sh toolset list
+deploy.sh toolset show science
+```
+
+`list` prints every toolset with its format (list / dict), version, and tool count. `show` prints one toolset's contents and flags tools that are missing from the manifest or not yet deployed on disk.
+
+#### `toolset bump` — Update version pins
+
+```bash
+deploy.sh toolset bump science --tool my-tool=1.3.0 --version 1.1.0
+deploy.sh toolset bump science --tool my-tool=1.3.0 --tool packaged-tool=3.1.0
+```
+
+Updates pins in a dict-format toolset and writes the manifest. Does **not** deploy — follow up with `apply` to place the new versions on disk. Rejects legacy list toolsets with a pointer to `toolset migrate`.
+
+#### `toolset migrate` — Convert legacy list to dict
+
+```bash
+deploy.sh toolset migrate legacy-suite --version 1.0.0
+```
+
+Converts `"legacy-suite": ["tool-a", "tool-b"]` to dict format using each member tool's current `version` field as the pin. Errors if any member has no recorded version.
+
+#### `prune` / `remove` — Clean up old versions
+
+```bash
+deploy.sh prune my-tool --keep 3
+deploy.sh remove my-tool --version 1.0.0
+```
+
+`prune` keeps the N newest semvers plus any version pinned by a dict-format toolset; everything else is removed (directory + modulefile). `remove` deletes one version; it refuses to remove a version that is pinned by a toolset unless `--force` is passed, and it clears `tools[x].version` in the manifest if that field still points at the removed version.
+
 ### Global Options (all subcommands)
 
 | Option | Description |
@@ -159,7 +210,8 @@ Reads dict-format toolsets from `tools.json`, deploys every tool+version pair no
 | `--config FILE` | Load configuration from FILE |
 | `--dry-run` | Show what would be done; make no changes |
 | `--non-interactive`, `-n` | Auto-confirm all prompts |
-| `--force` | Override deploy protection for externally managed tools |
+| `--force` | Override deploy protection for externally managed tools; allow `remove` on a pinned version |
+| `--overwrite` | Replace existing modulefiles instead of erroring (applies to `toolset` and `apply`) |
 | `--help`, `-h` | Show help (also works per subcommand) |
 
 ### Exit Codes
@@ -228,6 +280,12 @@ Reads dict-format toolsets from `tools.json`, deploys every tool+version pair no
 | `tools` | `{}` | Tool definitions |
 | `toolsets` | `{}` | Named groups of tools for combined modulefiles |
 | *custom string keys* | — | Any additional string field at root level becomes a template variable (e.g. `"app_root": "custom/apps"` → `{{app_root}}`). Non-string values are ignored. |
+
+**Namespace rules:**
+
+- Tool names and toolset names share a namespace — a tool and a toolset cannot have the same name (their modulefiles would land in the same directory).
+- These tool names are reserved because they collide with modulefile placeholders: `VERSION`, `ROOT`, `TOOL_NAME`, `DEPLOY_BASE_PATH`, `TOOL_LOADS`.
+- Both rules are enforced at manifest load time.
 
 #### Per-tool fields
 
@@ -305,7 +363,8 @@ Config files use `KEY=VALUE` format with `#` comments and optional quotes.
 | `REMOTE` | `RELEASE_REMOTE` | `origin` | Git remote name |
 | `TOOLS_MANIFEST` | `TOOLS_MANIFEST` | `./tools.json` | Path to the tools.json manifest |
 | `MF_BASE_PATH` | `MF_BASE_PATH` | *(none)* | Override modulefile directory |
-| `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template |
+| `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template (tool modulefiles, and toolsets if `TOOLSET_MODULEFILE_TEMPLATE` is unset) |
+| `TOOLSET_MODULEFILE_TEMPLATE` | `TOOLSET_MODULEFILE_TEMPLATE` | *(none)* | Path to a separate template for toolset modulefiles; falls back to `MODULEFILE_TEMPLATE` then the built-in default |
 
 ### Environment Variables (runtime)
 

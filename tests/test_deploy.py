@@ -28,6 +28,12 @@ from deploy import (
     cmd_upgrade,
     cmd_toolset,
     cmd_apply,
+    cmd_toolset_list,
+    cmd_toolset_show,
+    cmd_toolset_bump,
+    cmd_toolset_migrate,
+    cmd_prune,
+    cmd_remove,
     _compare_versions,
     _resolve_path_template,
     _acquire_deploy_lock,
@@ -55,6 +61,7 @@ def _make_args(**overrides):
         "cli_mf_path": "",
         "non_interactive": True,
         "force": False,
+        "overwrite": False,
     }
     base.update(overrides)
     return base
@@ -796,6 +803,20 @@ class TestToolsetCmd(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cmd_toolset("science", "1.0.0", _make_args(), config)
 
+    def test_toolset_existing_file_overwrite_ok(self):
+        """With --overwrite, cmd_toolset replaces an existing modulefile."""
+        config = self._config()
+        mf_dir = os.path.join(self.deploy_dir, "mf", "science")
+        os.makedirs(mf_dir)
+        mf_file = os.path.join(mf_dir, "1.0.0")
+        with open(mf_file, "w") as f:
+            f.write("existing\n")
+        cmd_toolset("science", "1.0.0", _make_args(overwrite=True), config)
+        with open(mf_file) as f:
+            content = f.read()
+        self.assertNotEqual(content, "existing\n")
+        self.assertIn("module load tool-a/1.2.0", content)
+
     def test_toolset_custom_mf_path(self):
         mf_dir = os.path.join(self.tmpdir, "custom_mf")
         os.makedirs(mf_dir)
@@ -821,6 +842,31 @@ class TestToolsetCmd(unittest.TestCase):
 
         mf_file = os.path.join(self.deploy_dir, "mf", "science", "1.0.0")
         self.assertFalse(os.path.isfile(mf_file))
+
+    def test_toolset_uses_toolset_template(self):
+        """cmd_toolset should honor toolset_modulefile_template."""
+        template_path = os.path.join(self.tmpdir, "toolset.tcl")
+        with open(template_path, "w") as f:
+            f.write("## TOOLSET %TOOL_NAME% v%VERSION%\n%TOOL_LOADS%\n")
+        config = self._config(toolset_modulefile_template=template_path)
+        cmd_toolset("science", "1.0.0", _make_args(), config)
+        mf_file = os.path.join(self.deploy_dir, "mf", "science", "1.0.0")
+        with open(mf_file) as f:
+            content = f.read()
+        self.assertIn("## TOOLSET science v1.0.0", content)
+        self.assertIn("module load tool-a/1.2.0", content)
+
+    def test_toolset_falls_back_to_modulefile_template(self):
+        """cmd_toolset uses modulefile_template when toolset_modulefile_template is empty."""
+        template_path = os.path.join(self.tmpdir, "mf.tcl")
+        with open(template_path, "w") as f:
+            f.write("## FALLBACK %TOOL_NAME%\n%TOOL_LOADS%\n")
+        config = self._config(modulefile_template=template_path)
+        cmd_toolset("science", "1.0.0", _make_args(), config)
+        mf_file = os.path.join(self.deploy_dir, "mf", "science", "1.0.0")
+        with open(mf_file) as f:
+            content = f.read()
+        self.assertIn("## FALLBACK science", content)
 
 
 class TestToolsetCmdDictFormat(unittest.TestCase):
@@ -2133,6 +2179,81 @@ class TestApplyCmd(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cmd_apply(_make_args(non_interactive=True), config, toolset_filter="nope")
 
+    def test_apply_updates_tool_version_for_skipped_already_deployed(self):
+        """Apply records tool.version even when a version is already on disk."""
+        tools = {
+            "tool-a": {
+                "version": "",
+                "source": {"type": "external", "path": self.source_a},
+                "install_path": "{{toolname}}/{{version}}",
+            },
+        }
+        # Pre-create deploy dir so apply skips with "Already deployed"
+        os.makedirs(os.path.join(self.deploy_dir, "tool-a", "1.0.0"))
+        _write_manifest(self.manifest_path, tools=tools, toolsets={
+            "science": {
+                "version": "1.0.0",
+                "tools": {"tool-a": "1.0.0"},
+            }
+        })
+        config = self._config()
+        cmd_apply(_make_args(non_interactive=True, force=True), config)
+
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["tools"]["tool-a"]["version"], "1.0.0")
+
+    def test_apply_records_highest_version_across_toolsets(self):
+        """When two toolsets pin different versions, tool.version reflects the highest."""
+        tools = {
+            "tool-a": {
+                "version": "",
+                "source": {"type": "external", "path": self.source_a},
+                "install_path": "{{toolname}}/{{version}}",
+            },
+        }
+        os.makedirs(os.path.join(self.deploy_dir, "tool-a", "1.0.0"))
+        os.makedirs(os.path.join(self.deploy_dir, "tool-a", "1.1.0"))
+        _write_manifest(self.manifest_path, tools=tools, toolsets={
+            "old-set": {
+                "version": "1.0.0",
+                "tools": {"tool-a": "1.0.0"},
+            },
+            "new-set": {
+                "version": "2.0.0",
+                "tools": {"tool-a": "1.1.0"},
+            },
+        })
+        config = self._config()
+        cmd_apply(_make_args(non_interactive=True, force=True), config)
+
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["tools"]["tool-a"]["version"], "1.1.0")
+
+    def test_apply_dry_run_does_not_update_version(self):
+        """Dry-run apply must not mutate tool.version."""
+        tools = {
+            "tool-a": {
+                "version": "0.9.0",
+                "source": {"type": "external", "path": self.source_a},
+                "install_path": "{{toolname}}/{{version}}",
+            },
+        }
+        os.makedirs(os.path.join(self.deploy_dir, "tool-a", "1.0.0"))
+        _write_manifest(self.manifest_path, tools=tools, toolsets={
+            "science": {
+                "version": "1.0.0",
+                "tools": {"tool-a": "1.0.0"},
+            }
+        })
+        config = self._config()
+        cmd_apply(_make_args(dry_run=True, non_interactive=True, force=True), config)
+
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["tools"]["tool-a"]["version"], "0.9.0")
+
     def test_apply_no_deploy_path_exits(self):
         """Apply without deploy_base_path should error."""
         # Write manifest without deploy_base_path set
@@ -2159,6 +2280,308 @@ class TestApplyCmd(unittest.TestCase):
         )
         with self.assertRaises(SystemExit):
             cmd_apply(_make_args(non_interactive=True), config)
+
+
+# ---------------------------------------------------------------------------
+# Toolset helper commands: list, show, bump, migrate
+# ---------------------------------------------------------------------------
+
+class TestToolsetHelperCmds(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.deploy_dir = os.path.join(self.tmpdir, "deploy")
+        os.makedirs(self.deploy_dir)
+        self.manifest_path = os.path.join(self.tmpdir, "tools.json")
+
+        _write_manifest(
+            self.manifest_path,
+            tools={
+                "alpha": {
+                    "version": "1.0.0",
+                    "source": {"type": "external", "path": self.tmpdir},
+                },
+                "beta": {
+                    "version": "2.0.0",
+                    "source": {"type": "external", "path": self.tmpdir},
+                },
+            },
+            toolsets={
+                "legacy": ["alpha", "beta"],
+                "pinned": {
+                    "version": "1.0.0",
+                    "tools": {"alpha": "1.0.0", "beta": "2.0.0"},
+                },
+            },
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _config(self, **kw):
+        base = dict(
+            deploy_base_path=self.deploy_dir,
+            tools_manifest=self.manifest_path,
+        )
+        base.update(kw)
+        return Config(**base)
+
+    def test_toolset_list_runs(self):
+        cmd_toolset_list(_make_args(), self._config())
+
+    def test_toolset_show_runs(self):
+        cmd_toolset_show("pinned", _make_args(), self._config())
+
+    def test_toolset_show_unknown_exits(self):
+        with self.assertRaises(SystemExit):
+            cmd_toolset_show("nope", _make_args(), self._config())
+
+    def test_toolset_bump_updates_pins(self):
+        cmd_toolset_bump(
+            "pinned", ["alpha=1.2.0"], "1.1.0", _make_args(), self._config(),
+        )
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["alpha"], "1.2.0")
+        self.assertEqual(data["toolsets"]["pinned"]["version"], "1.1.0")
+        # unchanged
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["beta"], "2.0.0")
+
+    def test_toolset_bump_rejects_legacy_format(self):
+        with self.assertRaises(SystemExit):
+            cmd_toolset_bump(
+                "legacy", ["alpha=1.2.0"], "", _make_args(), self._config(),
+            )
+
+    def test_toolset_bump_rejects_invalid_version(self):
+        with self.assertRaises(SystemExit):
+            cmd_toolset_bump(
+                "pinned", ["alpha=notsemver"], "", _make_args(), self._config(),
+            )
+
+    def test_toolset_bump_requires_updates(self):
+        with self.assertRaises(SystemExit):
+            cmd_toolset_bump("pinned", [], "", _make_args(), self._config())
+
+    def test_toolset_migrate_converts_legacy(self):
+        cmd_toolset_migrate("legacy", "2.0.0", _make_args(), self._config())
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertIsInstance(data["toolsets"]["legacy"], dict)
+        self.assertEqual(data["toolsets"]["legacy"]["version"], "2.0.0")
+        self.assertEqual(
+            data["toolsets"]["legacy"]["tools"],
+            {"alpha": "1.0.0", "beta": "2.0.0"},
+        )
+
+    def test_toolset_migrate_default_version(self):
+        cmd_toolset_migrate("legacy", "", _make_args(), self._config())
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["toolsets"]["legacy"]["version"], "1.0.0")
+
+    def test_toolset_migrate_already_dict_noop(self):
+        cmd_toolset_migrate("pinned", "", _make_args(), self._config())
+        # No error, no change
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["toolsets"]["pinned"]["version"], "1.0.0")
+
+    def test_toolset_migrate_missing_versions_exits(self):
+        # Clear a tool version
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        data["tools"]["alpha"]["version"] = ""
+        with open(self.manifest_path, "w") as f:
+            json.dump(data, f)
+        with self.assertRaises(SystemExit):
+            cmd_toolset_migrate("legacy", "", _make_args(), self._config())
+
+
+# ---------------------------------------------------------------------------
+# cmd_prune
+# ---------------------------------------------------------------------------
+
+class TestPruneCmd(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.deploy_dir = os.path.join(self.tmpdir, "deploy")
+        os.makedirs(self.deploy_dir)
+        self.manifest_path = os.path.join(self.tmpdir, "tools.json")
+        # Make deploy dirs for four versions
+        for v in ("0.9.0", "1.0.0", "1.1.0", "1.2.0"):
+            os.makedirs(os.path.join(self.deploy_dir, "alpha", v))
+        # And modulefiles for the same
+        mf_dir = os.path.join(self.deploy_dir, "mf", "alpha")
+        os.makedirs(mf_dir)
+        for v in ("0.9.0", "1.0.0", "1.1.0", "1.2.0"):
+            with open(os.path.join(mf_dir, v), "w") as f:
+                f.write(f"module v{v}\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _config(self, **kw):
+        base = dict(
+            deploy_base_path=self.deploy_dir,
+            tools_manifest=self.manifest_path,
+        )
+        base.update(kw)
+        return Config(**base)
+
+    def _write(self, toolsets=None):
+        _write_manifest(
+            self.manifest_path,
+            tools={
+                "alpha": {
+                    "version": "1.0.0",
+                    "source": {"type": "external", "path": self.tmpdir},
+                },
+            },
+            toolsets=toolsets or {},
+        )
+
+    def test_prune_keeps_newest_n(self):
+        self._write()
+        cmd_prune("alpha", 2, _make_args(non_interactive=True), self._config())
+        remaining = sorted(os.listdir(os.path.join(self.deploy_dir, "alpha")))
+        self.assertEqual(remaining, ["1.1.0", "1.2.0"])
+
+    def test_prune_keeps_pinned_versions(self):
+        """Pinned versions are kept even if older than the -keep window."""
+        self._write(toolsets={
+            "stable": {
+                "version": "1.0.0",
+                "tools": {"alpha": "0.9.0"},
+            },
+        })
+        cmd_prune("alpha", 1, _make_args(non_interactive=True), self._config())
+        remaining = sorted(os.listdir(os.path.join(self.deploy_dir, "alpha")))
+        self.assertIn("0.9.0", remaining)  # pinned
+        self.assertIn("1.2.0", remaining)  # newest
+
+    def test_prune_dry_run(self):
+        self._write()
+        cmd_prune(
+            "alpha", 1, _make_args(dry_run=True, non_interactive=True),
+            self._config(),
+        )
+        remaining = sorted(os.listdir(os.path.join(self.deploy_dir, "alpha")))
+        self.assertEqual(remaining, ["0.9.0", "1.0.0", "1.1.0", "1.2.0"])
+
+    def test_prune_unknown_tool_exits(self):
+        self._write()
+        with self.assertRaises(SystemExit):
+            cmd_prune(
+                "nope", 1, _make_args(non_interactive=True), self._config(),
+            )
+
+
+# ---------------------------------------------------------------------------
+# cmd_remove
+# ---------------------------------------------------------------------------
+
+class TestRemoveCmd(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.deploy_dir = os.path.join(self.tmpdir, "deploy")
+        os.makedirs(self.deploy_dir)
+        self.manifest_path = os.path.join(self.tmpdir, "tools.json")
+        os.makedirs(os.path.join(self.deploy_dir, "alpha", "1.0.0"))
+        os.makedirs(os.path.join(self.deploy_dir, "alpha", "1.1.0"))
+        mf_dir = os.path.join(self.deploy_dir, "mf", "alpha")
+        os.makedirs(mf_dir)
+        for v in ("1.0.0", "1.1.0"):
+            with open(os.path.join(mf_dir, v), "w") as f:
+                f.write(f"module v{v}\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _config(self, **kw):
+        base = dict(
+            deploy_base_path=self.deploy_dir,
+            tools_manifest=self.manifest_path,
+        )
+        base.update(kw)
+        return Config(**base)
+
+    def _write(self, toolsets=None, version="1.1.0"):
+        _write_manifest(
+            self.manifest_path,
+            tools={
+                "alpha": {
+                    "version": version,
+                    "source": {"type": "external", "path": self.tmpdir},
+                },
+            },
+            toolsets=toolsets or {},
+        )
+
+    def test_remove_unpinned_version(self):
+        self._write()
+        cmd_remove(
+            "alpha", "1.0.0", _make_args(non_interactive=True), self._config(),
+        )
+        self.assertFalse(os.path.isdir(
+            os.path.join(self.deploy_dir, "alpha", "1.0.0")
+        ))
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.deploy_dir, "mf", "alpha", "1.0.0")
+        ))
+
+    def test_remove_pinned_refuses_without_force(self):
+        self._write(toolsets={
+            "stable": {
+                "version": "1.0.0",
+                "tools": {"alpha": "1.0.0"},
+            },
+        })
+        with self.assertRaises(SystemExit):
+            cmd_remove(
+                "alpha", "1.0.0", _make_args(non_interactive=True),
+                self._config(),
+            )
+
+    def test_remove_pinned_with_force(self):
+        self._write(toolsets={
+            "stable": {
+                "version": "1.0.0",
+                "tools": {"alpha": "1.0.0"},
+            },
+        })
+        cmd_remove(
+            "alpha", "1.0.0",
+            _make_args(non_interactive=True, force=True),
+            self._config(),
+        )
+        self.assertFalse(os.path.isdir(
+            os.path.join(self.deploy_dir, "alpha", "1.0.0")
+        ))
+
+    def test_remove_clears_manifest_version(self):
+        self._write(version="1.0.0")
+        cmd_remove(
+            "alpha", "1.0.0", _make_args(non_interactive=True), self._config(),
+        )
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["tools"]["alpha"]["version"], "")
+
+    def test_remove_invalid_version_exits(self):
+        self._write()
+        with self.assertRaises(SystemExit):
+            cmd_remove(
+                "alpha", "notsemver", _make_args(non_interactive=True),
+                self._config(),
+            )
+
+    def test_remove_unknown_tool_exits(self):
+        self._write()
+        with self.assertRaises(SystemExit):
+            cmd_remove(
+                "nope", "1.0.0", _make_args(non_interactive=True),
+                self._config(),
+            )
 
 
 if __name__ == "__main__":

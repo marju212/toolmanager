@@ -68,11 +68,17 @@ USAGE = """\
 Usage: deploy.py <subcommand> [OPTIONS] [ARGS]
 
 Subcommands:
-  deploy  <tool> [--version X.Y.Z]    Deploy a tool; update tools.json
-  scan                                 Check all tools for newer versions
-  upgrade <tool>                       Deploy latest version; update tools.json
-  toolset <name> [--version X.Y.Z]    Write modulefile for a named toolset
-  apply   [--toolset <name>]           Deploy all versions referenced by toolsets
+  deploy   <tool> [--version X.Y.Z]    Deploy a tool; update tools.json
+  scan                                  Check all tools for newer versions
+  upgrade  <tool>                       Deploy latest version; update tools.json
+  toolset  <name> [--version X.Y.Z]     Write modulefile for a named toolset
+  toolset  list                         List every toolset
+  toolset  show <name>                  Show a toolset's contents + deploy status
+  toolset  bump <name> --tool N=V ...   Update a dict toolset's pins
+  toolset  migrate <name> [--version X] Convert legacy list toolset to dict
+  apply    [--toolset <name>]           Deploy all versions referenced by toolsets
+  prune    <tool> --keep N              Remove old versions, keep N newest + pinned
+  remove   <tool> --version X.Y.Z       Remove a single deployed version
 
 Global options:
   --manifest FILE        Path to tools.json manifest
@@ -82,6 +88,7 @@ Global options:
   --dry-run              Show what would be done, no changes
   --non-interactive, -n  Auto-confirm all prompts
   --force                Override deploy protection for external source tools
+  --overwrite            Replace existing modulefiles instead of erroring
   --help, -h             Show this help
 """
 
@@ -106,9 +113,28 @@ Deploy the latest available version of a tool and update tools.json.
 """
 
 USAGE_TOOLSET = """\
-Usage: deploy.py toolset <name> --version X.Y.Z [OPTIONS]
+Usage: deploy.py toolset <name> [--version X.Y.Z] [OPTIONS]
+       deploy.py toolset list
+       deploy.py toolset show <name>
+       deploy.py toolset bump <name> --tool NAME=VERSION [--tool ...] [--version X.Y.Z]
+       deploy.py toolset migrate <name> [--version X.Y.Z]
 
-Write a modulefile for a named toolset using current tool versions from tools.json.
+Without a sub-verb, writes a modulefile for the named toolset using current
+tool versions from tools.json.
+"""
+
+USAGE_PRUNE = """\
+Usage: deploy.py prune <tool> --keep N [OPTIONS]
+
+Remove old deployed versions of a tool, keeping the N newest.  Versions
+pinned by any dict-format toolset are always kept regardless of --keep.
+"""
+
+USAGE_REMOVE = """\
+Usage: deploy.py remove <tool> --version X.Y.Z [OPTIONS]
+
+Remove a single deployed version (directory + modulefile).  Refuses when
+the version is pinned by a toolset unless --force is given.
 """
 
 USAGE_APPLY = """\
@@ -390,7 +416,9 @@ def _write_tool_modulefile(
 
     Tries to copy the latest existing modulefile and update version
     references (preserves manual edits).  Falls back to a template from
-    the repo, the config, or the built-in default.
+    the repo, the config, or the built-in default.  Logs a one-line
+    ``Modulefile source: <label>`` so the operator sees which template
+    path was chosen.
     """
     if mf_path:
         mf_file = mf_path
@@ -406,11 +434,11 @@ def _write_tool_modulefile(
     latest_mf = find_latest_modulefile(mf_dir)
     if latest_mf and os.path.isfile(latest_mf) and not overwrite:
         prev_version = os.path.basename(latest_mf)
-        copy_and_update_modulefile(
+        label = copy_and_update_modulefile(
             latest_mf, mf_file, prev_version, version, dry_run
         )
     else:
-        template_content = resolve_template(
+        template_content, template_label = resolve_template(
             deploy_dir=deploy_root if os.path.isdir(deploy_root) else "",
             config_template_path=config.modulefile_template,
         )
@@ -423,9 +451,12 @@ def _write_tool_modulefile(
                 deploy_base_path=config.deploy_base_path,
             )
             write_modulefile(content, mf_file, dry_run, overwrite=overwrite)
+            label = template_label
         else:
             content = generate_default_modulefile(tool_name, version, root)
             write_modulefile(content, mf_file, dry_run, overwrite=overwrite)
+            label = "default"
+    log_info(f"Modulefile source: {label}")
 
 
 def _prompt_version_interactive(
@@ -1135,13 +1166,17 @@ def cmd_toolset(name: str, version: str, args: dict, config) -> None:
         version=version,
         deploy_base_path=deploy_base_path,
         tool_versions=tool_versions,
+        template_path=(
+            config.toolset_modulefile_template or config.modulefile_template
+        ),
     )
 
     mf_base = config.mf_base_path or os.path.join(deploy_base_path, "mf")
     mf_file = os.path.join(mf_base, name, version)
 
     dry_run = args["dry_run"]
-    write_modulefile(content, mf_file, dry_run)
+    overwrite = args.get("overwrite", False)
+    write_modulefile(content, mf_file, dry_run, overwrite=overwrite)
 
 
 def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
@@ -1150,6 +1185,10 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
     Reads dict-format toolsets, checks which tool+version pairs are
     already deployed on disk, deploys the missing ones, and writes
     toolset modulefiles.  This is the GitOps "reconcile" step.
+
+    After each successful deploy, the tool's ``version`` field in the
+    manifest is updated to the highest semver that was deployed for it
+    (so ``scan`` later shows an accurate "current" version).
     """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
@@ -1157,6 +1196,7 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
 
     dry_run = args["dry_run"]
     force = args["force"]
+    overwrite = args.get("overwrite", False)
 
     _validate_deploy_base_path(config.deploy_base_path, dry_run)
 
@@ -1203,6 +1243,18 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
     deployed_count = 0
     skipped_count = 0
     errors = []
+    # Track the highest version successfully placed on disk (deployed or
+    # already-present) per tool, so we can update tool.version below.
+    highest_on_disk: dict[str, tuple] = {}
+
+    def _record_on_disk(tool_name: str, version: str) -> None:
+        try:
+            parts = tuple(int(x) for x in version.split("."))
+        except ValueError:
+            return
+        prev = highest_on_disk.get(tool_name)
+        if prev is None or parts > prev[0]:
+            highest_on_disk[tool_name] = (parts, version)
 
     for (tool_name, version), ts_names in sorted(required.items()):
         tool_entry = data["tools"].get(tool_name)
@@ -1265,6 +1317,7 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
                     continue
                 if os.path.isdir(deploy_target):
                     log_info(f"Already deployed: {tool_name} {version}")
+                    _record_on_disk(tool_name, version)
                     skipped_count += 1
                     continue
 
@@ -1318,17 +1371,25 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
                     tool_name, version, deploy_root, config, dry_run,
                     install_path=resolved_install_path,
                     mf_path=resolved_mf_path,
-                    overwrite=True,
+                    overwrite=overwrite,
                 )
             except SystemExit:
                 errors.append((tool_name, version, "modulefile write failed"))
                 continue
 
             deployed_count += 1
+            _record_on_disk(tool_name, version)
 
         finally:
             if lock_fd is not None:
                 _release_deploy_lock(lock_fd, lock_path)
+
+    # Update tool.version in the manifest to the highest deployed version
+    # for each tool touched by this apply.
+    if highest_on_disk and not dry_run:
+        for tool_name, (_, version) in highest_on_disk.items():
+            set_tool_version(data, tool_name, version)
+        save_manifest(manifest_path, data)
 
     # Write toolset modulefiles
     for ts_name, ts_entry in selected_toolsets.items():
@@ -1343,13 +1404,23 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
             version=ts_version,
             deploy_base_path=config.deploy_base_path or "",
             tool_versions=tool_versions,
+            template_path=(
+                config.toolset_modulefile_template or config.modulefile_template
+            ),
         )
 
         mf_base = config.mf_base_path or os.path.join(
             config.deploy_base_path, "mf"
         )
         mf_file = os.path.join(mf_base, ts_name, ts_version)
-        write_modulefile(content, mf_file, dry_run, overwrite=True)
+        try:
+            write_modulefile(content, mf_file, dry_run, overwrite=overwrite)
+        except SystemExit:
+            errors.append(
+                (ts_name, ts_version,
+                 "toolset modulefile exists (rerun with --overwrite)")
+            )
+            continue
         if not dry_run:
             log_success(f"Toolset modulefile written: {mf_file}")
 
@@ -1367,6 +1438,393 @@ def cmd_apply(args: dict, config, toolset_filter: str = "") -> None:
         log_success("Apply completed successfully.")
 
 
+def cmd_toolset_list(args: dict, config) -> None:
+    """Print every toolset in the manifest with its format, version, and tool count."""
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    toolsets = data.get("toolsets", {})
+    if not toolsets:
+        log_info("No toolsets in manifest.")
+        return
+
+    name_w = max(len(n) for n in toolsets)
+    for name in sorted(toolsets):
+        entry = toolsets[name]
+        if isinstance(entry, dict):
+            ver = entry.get("version", "(none)")
+            tools = entry.get("tools", {})
+            fmt = "dict"
+            count = len(tools)
+        else:
+            ver = "(legacy)"
+            fmt = "list"
+            count = len(entry)
+        print(f"  {name:<{name_w}}  {fmt:<5}  {ver:<10}  {count} tool(s)")
+
+
+def cmd_toolset_show(name: str, args: dict, config) -> None:
+    """Print the contents of a single toolset with deploy-status hints."""
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
+    ts_entry = get_toolset(data, name)
+    ts_version = get_toolset_version(data, name)
+    tool_versions = get_toolset_tool_versions(data, name)
+
+    fmt = "dict" if isinstance(ts_entry, dict) else "list"
+    print(f"  Toolset:  {name}")
+    print(f"  Format:   {fmt}")
+    print(f"  Version:  {ts_version or '(none)'}")
+    if not tool_versions:
+        print("  Tools:    (none)")
+        return
+
+    tools = data.get("tools", {})
+    name_w = max(len(t) for t in tool_versions)
+    print("  Tools:")
+    for tname in sorted(tool_versions):
+        tver = tool_versions[tname]
+        flags = []
+        if tname not in tools:
+            flags.append("MISSING from tools")
+        elif not tver:
+            flags.append("no version")
+        elif config.deploy_base_path:
+            deploy_dir = os.path.join(config.deploy_base_path, tname, tver)
+            install_path = tools[tname].get("install_path")
+            if install_path:
+                try:
+                    resolved = _resolve_path_template(
+                        install_path, tname, tver,
+                        user_vars=collect_string_vars(data, tools[tname]),
+                    )
+                    if not os.path.isabs(resolved):
+                        resolved = os.path.join(config.deploy_base_path, resolved)
+                    deploy_dir = resolved
+                except SystemExit:
+                    pass
+            if not os.path.isdir(deploy_dir):
+                flags.append("NOT deployed")
+        flag_str = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"    {tname:<{name_w}}  {tver or '(none)':<10}{flag_str}")
+
+
+def cmd_toolset_bump(
+    name: str,
+    tool_updates: list,
+    new_ts_version: str,
+    args: dict,
+    config,
+) -> None:
+    """Update a dict-format toolset's tool pins (and optionally its version).
+
+    *tool_updates* is a list of ``"tool=X.Y.Z"`` strings.  Writes the manifest;
+    deploying the new pins is a separate step (``apply``).
+    """
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    ts_entry = get_toolset(data, name)
+
+    if not isinstance(ts_entry, dict):
+        log_error(
+            f"Toolset '{name}' uses legacy list format; bump requires dict "
+            f"format. Convert it first: deploy.sh toolset migrate {name}"
+        )
+        raise SystemExit(EXIT_CONFIG)
+
+    if new_ts_version:
+        try:
+            validate_semver(new_ts_version)
+        except ValueError:
+            log_error(f"Invalid toolset version: '{new_ts_version}'")
+            raise SystemExit(EXIT_CONFIG)
+
+    parsed_updates = {}
+    for item in tool_updates:
+        if "=" not in item:
+            log_error(f"Expected --tool NAME=VERSION, got: {item}")
+            raise SystemExit(EXIT_CONFIG)
+        tname, _, tver = item.partition("=")
+        tname = tname.strip()
+        tver = tver.strip()
+        if not tname or not tver:
+            log_error(f"Empty tool name or version in: {item}")
+            raise SystemExit(EXIT_CONFIG)
+        try:
+            validate_semver(tver)
+        except ValueError:
+            log_error(f"Invalid version for '{tname}': '{tver}'")
+            raise SystemExit(EXIT_CONFIG)
+        if tname not in ts_entry.get("tools", {}):
+            log_warn(
+                f"Tool '{tname}' is not currently in toolset '{name}' — adding."
+            )
+        if tname not in data.get("tools", {}):
+            log_warn(
+                f"Tool '{tname}' is not in the manifest 'tools' section."
+            )
+        parsed_updates[tname] = tver
+
+    if not parsed_updates and not new_ts_version:
+        log_error("Nothing to bump — pass --tool NAME=VERSION and/or --version.")
+        raise SystemExit(EXIT_CONFIG)
+
+    for tname, tver in parsed_updates.items():
+        ts_entry["tools"][tname] = tver
+        log_info(f"Set {name}.tools.{tname} = {tver}")
+    if new_ts_version:
+        ts_entry["version"] = new_ts_version
+        log_info(f"Set {name}.version = {new_ts_version}")
+
+    if args["dry_run"]:
+        log_info("[dry-run] Would save manifest.")
+        return
+    save_manifest(manifest_path, data)
+    log_success(
+        f"Toolset '{name}' updated. Run 'deploy.sh apply --toolset {name}' "
+        f"to deploy the new pins."
+    )
+
+
+def cmd_toolset_migrate(
+    name: str, new_ts_version: str, args: dict, config,
+) -> None:
+    """Convert a legacy list-format toolset to dict format.
+
+    Uses each member tool's current ``version`` field as the pin.  If any
+    member has no recorded version, errors and lists them.
+    """
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    ts_entry = get_toolset(data, name)
+
+    if isinstance(ts_entry, dict):
+        log_info(f"Toolset '{name}' is already in dict format — nothing to do.")
+        return
+
+    if not new_ts_version:
+        new_ts_version = "1.0.0"
+    try:
+        validate_semver(new_ts_version)
+    except ValueError:
+        log_error(f"Invalid toolset version: '{new_ts_version}'")
+        raise SystemExit(EXIT_CONFIG)
+
+    tools = data.get("tools", {})
+    pinned = {}
+    missing = []
+    for tname in ts_entry:
+        entry = tools.get(tname)
+        if not entry:
+            missing.append(f"{tname} (not in manifest)")
+            continue
+        tver = entry.get("version", "")
+        if not tver:
+            missing.append(f"{tname} (no deployed version)")
+            continue
+        pinned[tname] = tver
+
+    if missing:
+        log_error(f"Cannot migrate '{name}' — the following tools have no usable version:")
+        for m in missing:
+            log_error(f"  - {m}")
+        log_error("Deploy them first, then rerun migrate.")
+        raise SystemExit(EXIT_CONFIG)
+
+    data["toolsets"][name] = {"version": new_ts_version, "tools": pinned}
+    log_info(f"Converted '{name}' to dict format with version {new_ts_version}:")
+    for tname, tver in sorted(pinned.items()):
+        log_info(f"  {tname} = {tver}")
+
+    if args["dry_run"]:
+        log_info("[dry-run] Would save manifest.")
+        return
+    save_manifest(manifest_path, data)
+    log_success(f"Toolset '{name}' migrated.")
+
+
+def _semver_key(v: str) -> tuple:
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except ValueError:
+        return ()
+
+
+def _referenced_versions(data: dict, tool_name: str) -> set:
+    """Return the set of versions of *tool_name* pinned by any dict-format toolset."""
+    pinned = set()
+    for ts_entry in data.get("toolsets", {}).values():
+        if isinstance(ts_entry, dict):
+            v = ts_entry.get("tools", {}).get(tool_name)
+            if v:
+                pinned.add(v)
+    return pinned
+
+
+def _list_installed_versions(base_dir: str) -> list:
+    """Return valid semver subdirectories of *base_dir*, sorted ascending."""
+    if not os.path.isdir(base_dir):
+        return []
+    semver_re = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+    out = []
+    for entry in os.listdir(base_dir):
+        full = os.path.join(base_dir, entry)
+        if semver_re.match(entry) and os.path.isdir(full) and not os.path.islink(full):
+            out.append(entry)
+    out.sort(key=_semver_key)
+    return out
+
+
+def cmd_prune(tool_name: str, keep: int, args: dict, config) -> None:
+    """Remove old deployed versions of a tool, keeping the N newest + any pinned."""
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
+    get_tool(data, tool_name)
+
+    _validate_deploy_base_path(config.deploy_base_path, args["dry_run"])
+
+    deploy_dir = os.path.join(config.deploy_base_path, tool_name)
+    mf_base = config.mf_base_path or os.path.join(config.deploy_base_path, "mf")
+    mf_dir = os.path.join(mf_base, tool_name)
+
+    deploy_versions = _list_installed_versions(deploy_dir)
+    mf_versions = _list_installed_versions(mf_dir)
+    all_versions = sorted(set(deploy_versions + mf_versions), key=_semver_key)
+
+    if not all_versions:
+        log_info(f"No installed versions found for '{tool_name}'.")
+        return
+
+    pinned = _referenced_versions(data, tool_name)
+    keepers = set(all_versions[-keep:]) | pinned
+    removals = [v for v in all_versions if v not in keepers]
+
+    if not removals:
+        log_info(
+            f"Nothing to prune for '{tool_name}' "
+            f"(installed: {len(all_versions)}, keep: {keep}, pinned: {len(pinned)})."
+        )
+        return
+
+    print(f"  Will remove {len(removals)} version(s) of {tool_name}:", file=sys.stderr)
+    for v in removals:
+        print(f"    - {v}", file=sys.stderr)
+    print(f"  Keeping: {', '.join(sorted(keepers, key=_semver_key))}",
+          file=sys.stderr)
+
+    if not confirm(
+        f"Proceed with removal?",
+        dry_run=args["dry_run"],
+        non_interactive=args["non_interactive"],
+    ):
+        log_warn("Prune cancelled.")
+        return
+
+    for v in removals:
+        dpath = os.path.join(deploy_dir, v)
+        mpath = os.path.join(mf_dir, v)
+        if args["dry_run"]:
+            log_info(f"[dry-run] Would remove {dpath} and {mpath}")
+            continue
+        if os.path.isdir(dpath) and not os.path.islink(dpath):
+            if _is_inside(dpath, config.deploy_base_path):
+                shutil.rmtree(dpath, ignore_errors=True)
+                log_info(f"Removed {dpath}")
+            else:
+                log_warn(f"Skipping {dpath} — outside deploy base path.")
+        if os.path.isfile(mpath) and not os.path.islink(mpath):
+            try:
+                os.unlink(mpath)
+                log_info(f"Removed {mpath}")
+            except OSError as e:
+                log_warn(f"Could not remove {mpath}: {e}")
+    log_success(f"Pruned {len(removals)} version(s) of {tool_name}.")
+
+
+def cmd_remove(tool_name: str, version: str, args: dict, config) -> None:
+    """Remove a single deployed version of a tool and its modulefile.
+
+    Refuses when the version is pinned by any toolset unless ``--force``.
+    """
+    manifest_path = resolve_manifest_path(config)
+    data = load_manifest(manifest_path)
+    _apply_manifest_deploy_base(config, data)
+    get_tool(data, tool_name)
+    try:
+        validate_semver(version)
+    except ValueError:
+        log_error(f"Invalid version: '{version}' (expected X.Y.Z)")
+        raise SystemExit(EXIT_CONFIG)
+
+    _validate_deploy_base_path(config.deploy_base_path, args["dry_run"])
+
+    pinned = _referenced_versions(data, tool_name)
+    if version in pinned and not args["force"]:
+        pinning = [
+            ts for ts, entry in data.get("toolsets", {}).items()
+            if isinstance(entry, dict)
+            and entry.get("tools", {}).get(tool_name) == version
+        ]
+        log_error(
+            f"{tool_name} {version} is pinned by toolset(s): "
+            f"{', '.join(sorted(pinning))}. "
+            f"Run 'deploy.sh toolset bump' to re-pin, or pass --force."
+        )
+        raise SystemExit(EXIT_CONFIG)
+
+    deploy_dir = os.path.join(config.deploy_base_path, tool_name, version)
+    mf_base = config.mf_base_path or os.path.join(config.deploy_base_path, "mf")
+    mf_file = os.path.join(mf_base, tool_name, version)
+
+    targets = []
+    if os.path.isdir(deploy_dir):
+        targets.append(("dir", deploy_dir))
+    if os.path.isfile(mf_file):
+        targets.append(("file", mf_file))
+    if not targets:
+        log_info(f"Nothing to remove for {tool_name} {version}.")
+        return
+
+    for kind, path in targets:
+        print(f"  Will remove {kind}: {path}", file=sys.stderr)
+    if not confirm(
+        "Proceed with removal?",
+        dry_run=args["dry_run"],
+        non_interactive=args["non_interactive"],
+    ):
+        log_warn("Remove cancelled.")
+        return
+
+    for kind, path in targets:
+        if args["dry_run"]:
+            log_info(f"[dry-run] Would remove {path}")
+            continue
+        if os.path.islink(path):
+            log_warn(f"Refusing to remove symlink: {path}")
+            continue
+        if kind == "dir":
+            if _is_inside(path, config.deploy_base_path):
+                shutil.rmtree(path, ignore_errors=True)
+                log_info(f"Removed {path}")
+            else:
+                log_warn(f"Skipping {path} — outside deploy base path.")
+        else:
+            try:
+                os.unlink(path)
+                log_info(f"Removed {path}")
+            except OSError as e:
+                log_warn(f"Could not remove {path}: {e}")
+
+    # Clear tool.version if it matches the removed version
+    if data["tools"][tool_name].get("version") == version and not args["dry_run"]:
+        set_tool_version(data, tool_name, "")
+        save_manifest(manifest_path, data)
+        log_info(f"Cleared {tool_name}.version in manifest.")
+
+    log_success(f"Removed {tool_name} {version}.")
+
+
 def parse_global_args(argv: list) -> tuple:
     """Strip global flags from *argv* and return ``(remaining, args_dict)``.
 
@@ -1382,6 +1840,7 @@ def parse_global_args(argv: list) -> tuple:
         "cli_mf_path": "",
         "non_interactive": False,
         "force": False,
+        "overwrite": False,
     }
 
     remaining = []
@@ -1418,6 +1877,8 @@ def parse_global_args(argv: list) -> tuple:
             global_args["non_interactive"] = True
         elif arg == "--force":
             global_args["force"] = True
+        elif arg == "--overwrite":
+            global_args["overwrite"] = True
         else:
             remaining.append(arg)
         i += 1
@@ -1549,20 +2010,70 @@ def main(argv: list = None) -> None:
             print(USAGE_TOOLSET)
             raise SystemExit(0)
         if not sub_remaining:
-            log_error("toolset requires a name")
+            log_error("toolset requires a name or a sub-verb "
+                      "(list|show|bump|migrate)")
             print(USAGE_TOOLSET)
             raise SystemExit(1)
-        ts_name = sub_remaining[0]
-        if ts_name.startswith("-"):
-            log_error(f"Expected a toolset name, got option: {ts_name}")
-            print(USAGE_TOOLSET)
-            raise SystemExit(1)
-        version_arg, rest = _parse_subcommand_version(sub_remaining[1:])
-        if rest:
-            log_error(f"Unexpected argument(s): {' '.join(rest)}")
-            print(USAGE_TOOLSET)
-            raise SystemExit(1)
-        cmd_toolset(ts_name, version_arg, args, config)
+        first = sub_remaining[0]
+        if first == "list":
+            if sub_remaining[1:]:
+                log_error(f"Unexpected argument(s): {' '.join(sub_remaining[1:])}")
+                raise SystemExit(1)
+            cmd_toolset_list(args, config)
+        elif first == "show":
+            if len(sub_remaining) != 2:
+                log_error("toolset show requires exactly one toolset name")
+                raise SystemExit(1)
+            cmd_toolset_show(sub_remaining[1], args, config)
+        elif first == "bump":
+            if len(sub_remaining) < 2 or sub_remaining[1].startswith("-"):
+                log_error("toolset bump requires a toolset name")
+                raise SystemExit(1)
+            ts_name = sub_remaining[1]
+            rest = sub_remaining[2:]
+            tool_updates = []
+            new_version = ""
+            i = 0
+            while i < len(rest):
+                if rest[i] == "--tool":
+                    i += 1
+                    if i >= len(rest):
+                        log_error("--tool requires NAME=VERSION")
+                        raise SystemExit(EXIT_CONFIG)
+                    tool_updates.append(rest[i])
+                elif rest[i] == "--version":
+                    i += 1
+                    if i >= len(rest):
+                        log_error("--version requires a value")
+                        raise SystemExit(EXIT_CONFIG)
+                    new_version = rest[i]
+                else:
+                    log_error(f"Unexpected argument: {rest[i]}")
+                    raise SystemExit(EXIT_CONFIG)
+                i += 1
+            cmd_toolset_bump(ts_name, tool_updates, new_version, args, config)
+        elif first == "migrate":
+            if len(sub_remaining) < 2 or sub_remaining[1].startswith("-"):
+                log_error("toolset migrate requires a toolset name")
+                raise SystemExit(1)
+            ts_name = sub_remaining[1]
+            new_version, rest = _parse_subcommand_version(sub_remaining[2:])
+            if rest:
+                log_error(f"Unexpected argument(s): {' '.join(rest)}")
+                raise SystemExit(1)
+            cmd_toolset_migrate(ts_name, new_version, args, config)
+        else:
+            # Backwards-compatible "toolset <name>" form → write modulefile.
+            if first.startswith("-"):
+                log_error(f"Expected a toolset name or sub-verb, got: {first}")
+                print(USAGE_TOOLSET)
+                raise SystemExit(1)
+            version_arg, rest = _parse_subcommand_version(sub_remaining[1:])
+            if rest:
+                log_error(f"Unexpected argument(s): {' '.join(rest)}")
+                print(USAGE_TOOLSET)
+                raise SystemExit(1)
+            cmd_toolset(first, version_arg, args, config)
 
     # ------------------------------------------------------------------ apply
     elif subcommand == "apply":
@@ -1587,6 +2098,60 @@ def main(argv: list = None) -> None:
             print(USAGE_APPLY)
             raise SystemExit(1)
         cmd_apply(args, config, toolset_filter=toolset_filter)
+
+    # ------------------------------------------------------------------ prune
+    elif subcommand == "prune":
+        if "--help" in sub_remaining or "-h" in sub_remaining:
+            print(USAGE_PRUNE)
+            raise SystemExit(0)
+        if not sub_remaining or sub_remaining[0].startswith("-"):
+            log_error("prune requires a tool name")
+            print(USAGE_PRUNE)
+            raise SystemExit(EXIT_CONFIG)
+        tool_name = sub_remaining[0]
+        keep = 3
+        rest = []
+        i = 1
+        while i < len(sub_remaining):
+            if sub_remaining[i] == "--keep":
+                i += 1
+                if i >= len(sub_remaining):
+                    log_error("--keep requires an integer")
+                    raise SystemExit(EXIT_CONFIG)
+                try:
+                    keep = int(sub_remaining[i])
+                except ValueError:
+                    log_error(f"--keep must be an integer, got: {sub_remaining[i]}")
+                    raise SystemExit(EXIT_CONFIG)
+                if keep < 0:
+                    log_error("--keep must be non-negative")
+                    raise SystemExit(EXIT_CONFIG)
+            else:
+                rest.append(sub_remaining[i])
+            i += 1
+        if rest:
+            log_error(f"Unexpected argument(s): {' '.join(rest)}")
+            raise SystemExit(EXIT_CONFIG)
+        cmd_prune(tool_name, keep, args, config)
+
+    # ----------------------------------------------------------------- remove
+    elif subcommand == "remove":
+        if "--help" in sub_remaining or "-h" in sub_remaining:
+            print(USAGE_REMOVE)
+            raise SystemExit(0)
+        if not sub_remaining or sub_remaining[0].startswith("-"):
+            log_error("remove requires a tool name")
+            print(USAGE_REMOVE)
+            raise SystemExit(EXIT_CONFIG)
+        tool_name = sub_remaining[0]
+        version_arg, rest = _parse_subcommand_version(sub_remaining[1:])
+        if rest:
+            log_error(f"Unexpected argument(s): {' '.join(rest)}")
+            raise SystemExit(EXIT_CONFIG)
+        if not version_arg:
+            log_error("remove requires --version X.Y.Z")
+            raise SystemExit(EXIT_CONFIG)
+        cmd_remove(tool_name, version_arg, args, config)
 
     else:
         log_error(f"Unknown subcommand: {subcommand}")

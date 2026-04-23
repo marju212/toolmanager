@@ -96,9 +96,10 @@ class TestResolveTemplate(unittest.TestCase):
                 f.write("config template\n")
 
             # Repo template should win
-            result = resolve_template(deploy_dir=tmpdir,
-                                      config_template_path=config_template)
-            self.assertEqual(result, "repo template\n")
+            content, label = resolve_template(deploy_dir=tmpdir,
+                                              config_template_path=config_template)
+            self.assertEqual(content, "repo template\n")
+            self.assertEqual(label, "repo modulefile.tcl")
         finally:
             import shutil
             shutil.rmtree(tmpdir)
@@ -111,16 +112,18 @@ class TestResolveTemplate(unittest.TestCase):
                 f.write("config template\n")
 
             # No repo template → config template
-            result = resolve_template(deploy_dir=tmpdir,
-                                      config_template_path=config_template)
-            self.assertEqual(result, "config template\n")
+            content, label = resolve_template(deploy_dir=tmpdir,
+                                              config_template_path=config_template)
+            self.assertEqual(content, "config template\n")
+            self.assertEqual(label, "config template")
         finally:
             import shutil
             shutil.rmtree(tmpdir)
 
     def test_no_templates(self):
-        result = resolve_template()
-        self.assertIsNone(result)
+        content, label = resolve_template()
+        self.assertIsNone(content)
+        self.assertEqual(label, "default")
 
 
 class TestGenerateDefaultModulefile(unittest.TestCase):
@@ -231,6 +234,67 @@ class TestCopyAndUpdateModulefile(unittest.TestCase):
             copy_and_update_modulefile(src, dst, "1.0.0", "1.1.0",
                                        dry_run=True)
             self.assertFalse(os.path.exists(dst))
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_does_not_rewrite_unrelated_version_substring(self):
+        """A path like /opt/support-libs-1.0.0/ must not be touched."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            src = os.path.join(tmpdir, "1.0.0")
+            dst = os.path.join(tmpdir, "1.5.0")
+            with open(src, "w") as f:
+                f.write(
+                    "prepend-path LD_LIBRARY_PATH /opt/support-libs-1.0.0/lib\n"
+                    "set root /opt/tool/1.0.0\n"
+                    "version 1.0.0\n"
+                )
+            copy_and_update_modulefile(src, dst, "1.0.0", "1.5.0")
+            with open(dst) as f:
+                content = f.read()
+            self.assertIn("support-libs-1.0.0", content)
+            self.assertIn("/opt/tool/1.5.0", content)
+            self.assertIn("version 1.5.0", content)
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_prefers_placeholder_when_present(self):
+        """Sources with %VERSION% should use the placeholder pass, not regex."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            src = os.path.join(tmpdir, "1.0.0")
+            dst = os.path.join(tmpdir, "1.5.0")
+            with open(src, "w") as f:
+                # The literal "1.0.0" appears in a context regex would miss,
+                # but %VERSION% must be rewritten. And 1.0.0 in the comment
+                # should be preserved because we took the placeholder path.
+                f.write(
+                    "# pinned against libfoo 1.0.0\n"
+                    "set root /opt/tool/%VERSION%\n"
+                )
+            result = copy_and_update_modulefile(src, dst, "1.0.0", "1.5.0")
+            with open(dst) as f:
+                content = f.read()
+            self.assertIn("/opt/tool/1.5.0", content)
+            self.assertIn("libfoo 1.0.0", content)
+            self.assertIn("placeholder", result)
+
+    # ---------- end of test_prefers_placeholder_when_present ----------
+        finally:
+            import shutil
+            shutil.rmtree(tmpdir)
+
+    def test_returns_strategy_label(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            src = os.path.join(tmpdir, "1.0.0")
+            dst = os.path.join(tmpdir, "1.1.0")
+            with open(src, "w") as f:
+                f.write("set root /opt/tool/1.0.0\n")
+            label = copy_and_update_modulefile(src, dst, "1.0.0", "1.1.0")
+            self.assertIn("1.0.0", label)
         finally:
             import shutil
             shutil.rmtree(tmpdir)

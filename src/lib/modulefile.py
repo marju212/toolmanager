@@ -135,8 +135,8 @@ def validate_template_placeholders(
 def resolve_template(
     deploy_dir: str = "",
     config_template_path: str = "",
-) -> str | None:
-    """Decide which modulefile template to use and return its content.
+) -> tuple[str | None, str]:
+    """Decide which modulefile template to use and return ``(content, label)``.
 
     Checks sources in priority order:
 
@@ -144,9 +144,12 @@ def resolve_template(
        individual tools ship their own template.
     2. A global template file pointed to by the config
        (``MODULEFILE_TEMPLATE``).
-    3. ``None`` — signals the caller to fall back to the built-in default.
+    3. ``(None, "default")`` — signals the caller to fall back to the
+       built-in default.
 
-    Returns the template as a string, or ``None``.
+    The *label* is a short human-readable string naming the source
+    (``"repo modulefile.tcl"``, ``"config template"``, or ``"default"``)
+    so the deploy command can log which template was chosen.
     """
     # Check for modulefile.tcl in the deployed repo
     if deploy_dir:
@@ -154,7 +157,7 @@ def resolve_template(
         if os.path.isfile(repo_template):
             try:
                 with open(repo_template, "r") as f:
-                    return f.read()
+                    return f.read(), "repo modulefile.tcl"
             except OSError as e:
                 log_warn(f"Cannot read repo template '{repo_template}': {e} "
                          "— falling through to next template source.")
@@ -163,12 +166,12 @@ def resolve_template(
     if config_template_path and os.path.isfile(config_template_path):
         try:
             with open(config_template_path, "r") as f:
-                return f.read()
+                return f.read(), "config template"
         except OSError as e:
             log_warn(f"Cannot read config template '{config_template_path}': {e} "
                      "— using default template.")
 
-    return None
+    return None, "default"
 
 
 def generate_default_modulefile(tool_name: str, version: str, root: str) -> str:
@@ -294,21 +297,28 @@ def copy_and_update_modulefile(
     old_version: str,
     new_version: str,
     dry_run: bool = False,
-) -> None:
+) -> str:
     """Create a new modulefile by copying a previous version and updating it.
 
-    Reads *source_path*, replaces all occurrences of *old_version* with
-    *new_version* (using word-boundary anchors so ``1.1.0`` inside
-    ``21.1.0`` is not accidentally changed), and writes to *dest_path*.
+    Two substitution strategies, in order of preference:
 
-    This is the preferred path for generating modulefiles because it
-    preserves any manual customisations the operator made to a previous
-    version's modulefile.
+    1. **Placeholder-preferred** — if the source contains ``%VERSION%``,
+       treat it as a template and substitute placeholders.  This is the
+       safest path because the modulefile explicitly marks version sites.
+    2. **Contextual regex** — otherwise, replace ``old_version`` only in
+       contexts that unambiguously refer to the version: as a path
+       segment (``/1.0.0/``, ``/1.0.0"``, ``/1.0.0`` at end of line), in
+       ``set foo … 1.0.0`` / ``set foo … 1.0.0/…``, or in ``version 1.0.0``
+       / ``whatis`` lines, or in ``module load <tool>/1.0.0``.  Bare
+       occurrences of the version (e.g. inside the path
+       ``/opt/support-libs-1.0.0``) are left alone.
+
+    Returns a short label describing which strategy was used (for logging).
     """
     if dry_run:
         log_info(f"[dry-run] Would copy modulefile from {source_path} to "
                  f"{dest_path} (updating version to {new_version})")
-        return
+        return f"copy of {old_version}"
 
     try:
         with open(source_path, "r") as f:
@@ -317,12 +327,24 @@ def copy_and_update_modulefile(
         log_error(f"Cannot read modulefile '{source_path}': {e}")
         raise SystemExit(1)
 
-    # Use word-boundary anchors so e.g. "1.1.0" inside "21.1.0" is not replaced.
-    content = re.sub(
-        r"(?<![.\d])" + re.escape(old_version) + r"(?![.\d])",
-        new_version,
-        content,
-    )
+    if "%VERSION%" in content:
+        content = content.replace("%VERSION%", new_version)
+        strategy = f"copy of {old_version} (placeholder)"
+    else:
+        esc = re.escape(old_version)
+        # Match the version only in contexts that refer to *this* tool's version.
+        # - path segment: "/1.0.0/", "/1.0.0\"", "/1.0.0" at EOL/whitespace
+        # - after whitespace in "set … 1.0.0", "version 1.0.0", "whatis … 1.0.0"
+        # - in "tool-name/1.0.0" inside `module load` etc. (handled by the /seg rule)
+        patterns = [
+            # /X.Y.Z followed by /, ", end-of-line, or whitespace
+            rf"(?<=/){esc}(?=[/\"\s]|$)",
+            # space/tab then X.Y.Z at end of line or followed by quote/space
+            rf"(?<=[ \t]){esc}(?=[\"\s]|$)",
+        ]
+        for pat in patterns:
+            content = re.sub(pat, new_version, content, flags=re.MULTILINE)
+        strategy = f"copy of {old_version}"
 
     # Refuse to follow symlinks
     if os.path.islink(dest_path):
@@ -341,6 +363,7 @@ def copy_and_update_modulefile(
         log_error(f"Cannot write modulefile to '{dest_path}': {e}")
         raise SystemExit(1)
     log_success(f"Modulefile copied and updated to {dest_path}")
+    return strategy
 
 
 def find_latest_modulefile(mf_dir: str) -> str | None:

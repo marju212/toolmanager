@@ -31,6 +31,11 @@
 # Env var: MODULEFILE_TEMPLATE
 # MODULEFILE_TEMPLATE=/opt/templates/my-tool.tcl
 
+# Separate template for toolset modulefiles. If unset, toolsets use
+# MODULEFILE_TEMPLATE, falling back to the built-in default.
+# Env var: TOOLSET_MODULEFILE_TEMPLATE
+# TOOLSET_MODULEFILE_TEMPLATE=/opt/templates/toolset.tcl
+
 # Override the base directory for modulefiles.
 # If unset, modulefiles are written to deploy_base_path/mf/<tool>/<version>.
 # If set, modulefiles are written to MF_BASE_PATH/<tool>/<version>.

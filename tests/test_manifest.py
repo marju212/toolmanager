@@ -204,6 +204,38 @@ class TestLoadManifest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             load_manifest(path)
 
+    def test_tool_toolset_name_collision_exits(self):
+        """Tool and toolset sharing a name would clobber each other's modulefiles."""
+        bad = {
+            "tools": {
+                "science": {
+                    "version": "1.0.0",
+                    "source": {"type": "git", "url": "x"},
+                }
+            },
+            "toolsets": {"science": ["science"]},
+        }
+        path = self._write(bad)
+        with self.assertRaises(SystemExit):
+            load_manifest(path)
+
+    def test_reserved_tool_name_exits(self):
+        """A tool named like a standard modulefile placeholder must be rejected."""
+        for reserved in ("VERSION", "ROOT", "TOOL_NAME", "DEPLOY_BASE_PATH",
+                         "TOOL_LOADS"):
+            bad = {
+                "tools": {
+                    reserved: {
+                        "version": "1.0.0",
+                        "source": {"type": "git", "url": "x"},
+                    }
+                },
+                "toolsets": {},
+            }
+            path = self._write(bad)
+            with self.assertRaises(SystemExit, msg=f"{reserved} should be rejected"):
+                load_manifest(path)
+
 
 class TestSetToolVersion(unittest.TestCase):
     def test_set_tool_version(self):

@@ -241,6 +241,10 @@ Toolsets support two formats:
 
 Both formats work with `toolset`. The dict format is required for `apply`.
 
+#### Reserved names
+
+Tool names and toolset names share a namespace — a tool and a toolset cannot share a name. The following names are also reserved because they collide with standard modulefile placeholders: `VERSION`, `ROOT`, `TOOL_NAME`, `DEPLOY_BASE_PATH`, `TOOL_LOADS`. Both restrictions are checked at manifest load time.
+
 ---
 
 ## Part 2 — Releasing a Tool
@@ -329,14 +333,20 @@ Changelog:
 
 ## Part 3 — Deploying Tools
 
-`deploy.sh` has five subcommands:
+`deploy.sh` subcommands:
 
 ```
-deploy.sh deploy  <tool> [--version X.Y.Z]   Deploy a tool version
-deploy.sh scan                                Check all tools for newer versions
-deploy.sh upgrade <tool>                      Deploy the latest available version
-deploy.sh toolset <name> [--version X.Y.Z]    Write a toolset modulefile (version from dict-format toolset if omitted)
-deploy.sh apply   [--toolset <name>]           Deploy all versions referenced by toolsets
+deploy.sh deploy   <tool> [--version X.Y.Z]          Deploy a tool version
+deploy.sh scan                                        Check all tools for newer versions
+deploy.sh upgrade  <tool>                             Deploy the latest available version
+deploy.sh toolset  <name> [--version X.Y.Z]           Write a toolset modulefile
+deploy.sh toolset  list                               List every toolset
+deploy.sh toolset  show <name>                        Show a toolset's contents + deploy status
+deploy.sh toolset  bump <name> --tool NAME=VERSION    Update a dict toolset's pins
+deploy.sh toolset  migrate <name> [--version X.Y.Z]   Convert legacy list toolset to dict
+deploy.sh apply    [--toolset <name>]                 Deploy all versions referenced by toolsets
+deploy.sh prune    <tool> --keep N                    Remove old versions (keeps newest N + pinned)
+deploy.sh remove   <tool> --version X.Y.Z             Remove one deployed version
 ```
 
 Global options available on all subcommands:
@@ -349,7 +359,8 @@ Global options available on all subcommands:
 | `--config FILE` | Path to `.release.conf` |
 | `--dry-run` | Show what would be done; make no changes |
 | `--non-interactive`, `-n` | Auto-confirm all prompts |
-| `--force` | Override deploy protection for externally managed tools |
+| `--force` | Override deploy protection for externally managed tools; allow `remove` on a pinned version |
+| `--overwrite` | Replace existing modulefiles instead of erroring (applies to `toolset` and `apply`) |
 | `--help`, `-h` | Show help (works at top level and per subcommand) |
 
 ### 3.1 deploy — Deploy a Specific Version
@@ -538,11 +549,12 @@ deploy.sh apply
 ```
 
 Behavior:
-- **Already deployed**: If the deploy directory already exists on disk, the tool+version is skipped.
+- **Already deployed**: If the deploy directory already exists on disk, the tool+version is skipped (but still counted as "on disk" for the version-update below).
 - **Externally managed**: Tools with source type `"external"` are skipped with a warning (use `--force` to override).
 - **Error handling**: If one tool fails, the rest continue. A summary is printed at the end.
-- **Toolset modulefiles**: Written with `overwrite` — re-running apply updates them.
+- **Toolset modulefiles**: Re-running `apply` with `--overwrite` replaces existing toolset modulefiles; without `--overwrite` an existing modulefile is reported as an error and the others continue.
 - **Legacy toolsets**: Apply rejects list-format toolsets; only dict format with version pins is accepted.
+- **Manifest update**: After a successful pass, `apply` sets `tools[<name>].version` to the highest version it placed on disk for each tool. A later `scan` then shows accurate "current" versions.
 
 ```bash
 deploy.sh apply                          # all toolsets
@@ -550,7 +562,71 @@ deploy.sh apply --toolset science        # one toolset
 deploy.sh apply --dry-run                # preview only
 deploy.sh apply -n                       # non-interactive
 deploy.sh apply --force                  # include externally managed tools
+deploy.sh apply --overwrite              # replace existing modulefiles
 ```
+
+### 3.6 Managing toolsets — list, show, bump, migrate
+
+Four read/write helpers make it easier to inspect and edit toolsets without hand-editing `tools.json`.
+
+**List every toolset:**
+
+```bash
+deploy.sh toolset list
+#   classic  list   (legacy)    2 tool(s)
+#   pinned   dict   1.0.0       2 tool(s)
+```
+
+**Show a single toolset with deploy status:**
+
+```bash
+deploy.sh toolset show pinned
+#   Toolset:  pinned
+#   Format:   dict
+#   Version:  1.0.0
+#   Tools:
+#     alpha  1.0.0
+#     beta   2.0.0       [NOT deployed]
+```
+
+`show` flags tools that are missing from the manifest and tools whose pinned version has no deploy directory yet.
+
+**Bump pinned versions without hand-editing JSON:**
+
+```bash
+deploy.sh toolset bump pinned --tool alpha=1.2.0
+deploy.sh toolset bump pinned --tool alpha=1.2.0 --tool beta=2.1.0 --version 1.1.0
+```
+
+`bump` only edits the manifest — nothing is deployed. Follow up with `deploy.sh apply --toolset pinned` to place the new versions on disk. Bump rejects legacy list toolsets with a pointer to `migrate`.
+
+**Migrate a legacy list toolset to dict format:**
+
+```bash
+deploy.sh toolset migrate classic --version 1.0.0
+```
+
+Each member's current `version` field becomes the pin. If any member has no recorded version, migrate errors and lists them — deploy them first, then rerun. If `--version` is omitted, `1.0.0` is used.
+
+### 3.7 Cleaning up — prune and remove
+
+Neither `deploy` nor `apply` ever deletes anything. Two commands handle cleanup.
+
+**`prune` — drop old versions, keep the newest N and anything pinned:**
+
+```bash
+deploy.sh prune my-tool --keep 3
+```
+
+Scans `<deploy_base>/<tool>/` and `<mf_base>/<tool>/` for semver-named versions, keeps the N newest plus every version referenced by a dict-format toolset (so you can't delete a version that is currently pinned), and removes the rest. Interactive confirmation unless `-n`.
+
+**`remove` — delete one specific version:**
+
+```bash
+deploy.sh remove my-tool --version 1.0.0
+```
+
+Removes the deploy directory and modulefile for a single version. Refuses if any dict-format toolset pins that version — the error message names the pinning toolsets and suggests `toolset bump` to re-pin first. Pass `--force` to override. If `tools[x].version` was pointing at the removed version, the field is cleared in the manifest.
 
 ---
 
@@ -605,6 +681,29 @@ Config has MODULEFILE_TEMPLATE path?  → substitute placeholders, write
 Default hardcoded template            → write
 ```
 
+Each deploy logs which source was used as a single line:
+
+```
+ℹ Modulefile source: copy of 1.2.0 (placeholder)
+ℹ Modulefile source: repo modulefile.tcl
+ℹ Modulefile source: config template
+ℹ Modulefile source: default
+```
+
+**Toolset modulefiles** follow a shorter chain: `TOOLSET_MODULEFILE_TEMPLATE` → `MODULEFILE_TEMPLATE` → built-in default. If you want tool and toolset modulefiles to use different layouts, set `TOOLSET_MODULEFILE_TEMPLATE` separately; otherwise the single `MODULEFILE_TEMPLATE` applies to both.
+
+### Copy-and-update: placeholder-preferred
+
+When a previous version's modulefile exists, `deploy` prefers to copy-and-update it (preserving manual edits the operator made). Two substitution strategies, in priority order:
+
+1. **Placeholder** — if the source file contains `%VERSION%`, only `%VERSION%` is replaced. This is the safest path: the modulefile explicitly marks its version sites.
+2. **Contextual regex** — otherwise, `old_version` is replaced only in unambiguous contexts:
+   - as a path segment (`/1.0.0/`, `/1.0.0"`, `/1.0.0` at end of line),
+   - after whitespace (`version 1.0.0`, `set foo 1.0.0`),
+   - inside `module load tool/1.0.0`.
+
+   Bare occurrences of the version elsewhere (for example inside a path like `/opt/support-libs-1.0.0/`) are left alone. If your modulefile bakes the version into unusual places, add `%VERSION%` to get the safer path.
+
 ### Placeholders
 
 | Placeholder | Value |
@@ -654,8 +753,11 @@ conflict science
 Set via config:
 
 ```ini
-MODULEFILE_TEMPLATE=/opt/templates/science.tcl
+MODULEFILE_TEMPLATE=/opt/templates/mf.tcl
+TOOLSET_MODULEFILE_TEMPLATE=/opt/templates/toolset.tcl
 ```
+
+`TOOLSET_MODULEFILE_TEMPLATE` applies only to toolset modulefiles. If it is not set, toolset modulefiles fall back to `MODULEFILE_TEMPLATE` and then to the built-in default.
 
 ---
 
@@ -1105,7 +1207,8 @@ deploy.sh scan -n
 | `REMOTE` | `RELEASE_REMOTE` | `origin` | Git remote name |
 | `TOOLS_MANIFEST` | `TOOLS_MANIFEST` | `./tools.json` | Path to the tools.json manifest |
 | `MF_BASE_PATH` | `MF_BASE_PATH` | *(none)* | Override modulefile directory (e.g. separate NFS mount) |
-| `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template file |
+| `MODULEFILE_TEMPLATE` | `MODULEFILE_TEMPLATE` | *(none)* | Path to a custom modulefile template file (tool modulefiles; also used for toolsets if `TOOLSET_MODULEFILE_TEMPLATE` is unset) |
+| `TOOLSET_MODULEFILE_TEMPLATE` | `TOOLSET_MODULEFILE_TEMPLATE` | *(none)* | Path to a separate template for toolset modulefiles |
 
 Environment variables are snapshotted at startup — config files cannot override them.
 
@@ -1133,6 +1236,9 @@ Environment variables are snapshotted at startup — config files cannot overrid
 
 # Custom modulefile template file
 # MODULEFILE_TEMPLATE=/opt/templates/my-tool.tcl
+
+# Separate template for toolset modulefiles (falls back to MODULEFILE_TEMPLATE)
+# TOOLSET_MODULEFILE_TEMPLATE=/opt/templates/toolset.tcl
 ```
 
 ---
@@ -1162,3 +1268,7 @@ Environment variables are snapshotted at startup — config files cannot overrid
 | `tools.json not found` | Manifest path wrong | Pass `--manifest FILE` or set `TOOLS_MANIFEST` |
 | `Tool has no deployed version recorded` | `version` is empty in tools.json | Run `deploy.sh deploy <tool>` first |
 | Tool name contains `/` | Manifest has a path-traversal name | Fix the tool name in tools.json |
+| `Name collision between tools and toolsets` | A tool and a toolset share a name | Rename one side — they share a modulefile namespace |
+| `Tool name 'X' is reserved` | Tool named like a modulefile placeholder | Rename (avoid `VERSION`, `ROOT`, `TOOL_NAME`, `DEPLOY_BASE_PATH`, `TOOL_LOADS`) |
+| `is pinned by toolset(s): …` | `remove` on a version referenced by a toolset | `toolset bump` the toolset first, or pass `--force` |
+| `toolset modulefile exists` during `apply` | Existing file, `--overwrite` not set | Re-run with `--overwrite` to replace |

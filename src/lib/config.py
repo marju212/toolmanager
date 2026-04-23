@@ -29,6 +29,7 @@ _ENV_SNAPSHOT = {
     "RELEASE_TAG_PREFIX": os.environ.get("RELEASE_TAG_PREFIX", ""),
     "RELEASE_REMOTE": os.environ.get("RELEASE_REMOTE", ""),
     "MODULEFILE_TEMPLATE": os.environ.get("MODULEFILE_TEMPLATE", ""),
+    "TOOLSET_MODULEFILE_TEMPLATE": os.environ.get("TOOLSET_MODULEFILE_TEMPLATE", ""),
     "MF_BASE_PATH": os.environ.get("MF_BASE_PATH", ""),
     "TOOLS_MANIFEST": os.environ.get("TOOLS_MANIFEST", ""),
 }
@@ -43,6 +44,7 @@ _CONFIG_KEY_TO_ENV = {
     "TAG_PREFIX": "RELEASE_TAG_PREFIX",
     "REMOTE": "RELEASE_REMOTE",
     "MODULEFILE_TEMPLATE": "MODULEFILE_TEMPLATE",
+    "TOOLSET_MODULEFILE_TEMPLATE": "TOOLSET_MODULEFILE_TEMPLATE",
     "MF_BASE_PATH": "MF_BASE_PATH",
     "TOOLS_MANIFEST": "TOOLS_MANIFEST",
 }
@@ -84,6 +86,13 @@ class Config:
     # of using the built-in default template.
     # Config key: MODULEFILE_TEMPLATE | Env: MODULEFILE_TEMPLATE
     modulefile_template: str = ""
+
+    # Path to a Tcl template used for *toolset* modulefiles.  If unset,
+    # toolsets fall back to ``modulefile_template`` and then to the built-in
+    # toolset default.  Toolset templates can use ``%TOOL_LOADS%`` and
+    # per-tool ``%<tool-name>%`` placeholders.
+    # Config key: TOOLSET_MODULEFILE_TEMPLATE | Env: TOOLSET_MODULEFILE_TEMPLATE
+    toolset_modulefile_template: str = ""
 
     # Absolute path to the base directory for Environment Modules files.
     # Modulefiles are written to <mf_base_path>/<tool>/<version>.
@@ -177,6 +186,8 @@ def _apply_conf(config: Config, conf: dict, source_label: str = "config file") -
         config.remote = conf["REMOTE"]
     if "MODULEFILE_TEMPLATE" in conf:
         config.modulefile_template = conf["MODULEFILE_TEMPLATE"]
+    if "TOOLSET_MODULEFILE_TEMPLATE" in conf:
+        config.toolset_modulefile_template = conf["TOOLSET_MODULEFILE_TEMPLATE"]
     if "MF_BASE_PATH" in conf:
         config.mf_base_path = conf["MF_BASE_PATH"]
     if "TOOLS_MANIFEST" in conf:
@@ -243,6 +254,8 @@ def load_config(
         config.remote = _ENV_SNAPSHOT["RELEASE_REMOTE"]
     if _ENV_SNAPSHOT["MODULEFILE_TEMPLATE"]:
         config.modulefile_template = _ENV_SNAPSHOT["MODULEFILE_TEMPLATE"]
+    if _ENV_SNAPSHOT["TOOLSET_MODULEFILE_TEMPLATE"]:
+        config.toolset_modulefile_template = _ENV_SNAPSHOT["TOOLSET_MODULEFILE_TEMPLATE"]
     if _ENV_SNAPSHOT["MF_BASE_PATH"]:
         config.mf_base_path = _ENV_SNAPSHOT["MF_BASE_PATH"]
     if _ENV_SNAPSHOT["TOOLS_MANIFEST"]:

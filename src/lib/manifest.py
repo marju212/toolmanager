@@ -37,6 +37,12 @@ _REQUIRED_SOURCE_FIELDS = {
     "external": ["path"],
 }
 
+# Reserved tool names that collide with standard modulefile placeholders.
+# A tool literally named "VERSION" would be shadowed by %VERSION% in templates.
+_RESERVED_TOOL_NAMES = frozenset(
+    {"VERSION", "ROOT", "TOOL_NAME", "DEPLOY_BASE_PATH", "TOOL_LOADS"}
+)
+
 
 def load_manifest(path: str) -> dict:
     """Read ``tools.json`` from disk, validate its structure, and return it.
@@ -104,6 +110,13 @@ def load_manifest(path: str) -> dict:
                 f"Tool name '{name}' contains unsafe characters: "
                 f"{' '.join(sorted(bad))}  "
                 f"— only alphanumerics, hyphens, underscores, and dots are allowed."
+            )
+            raise SystemExit(1)
+        if name in _RESERVED_TOOL_NAMES:
+            log_error(
+                f"Tool name '{name}' is reserved — it collides with a "
+                f"standard modulefile placeholder. "
+                f"Reserved names: {', '.join(sorted(_RESERVED_TOOL_NAMES))}"
             )
             raise SystemExit(1)
         if "source" not in tool:
@@ -201,6 +214,17 @@ def load_manifest(path: str) -> dict:
                 log_warn(
                     f"Toolset '{ts_name}' references unknown tool: {tool_name}"
                 )
+
+    # A tool and a toolset sharing a name would produce modulefiles at the
+    # same path (<mf_base>/<name>/<version>) and silently overwrite each other.
+    shared = set(data["tools"]).intersection(data["toolsets"])
+    if shared:
+        log_error(
+            f"Name collision between tools and toolsets: "
+            f"{', '.join(sorted(shared))}. "
+            f"Tool and toolset names share a namespace — rename one side."
+        )
+        raise SystemExit(1)
 
     return data
 
