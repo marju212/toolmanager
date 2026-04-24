@@ -267,7 +267,13 @@ For brevity, set these shell variables:
 ```bash
 DEPLOY="../../scripts/deploy.sh"
 OPTS="--manifest manifest/tools.json --config manifest/.release.conf -n"
+
+# Same options minus -n, for commands you want to run interactively:
+IOPTS="--manifest manifest/tools.json --config manifest/.release.conf"
 ```
+
+The `-n` (`--non-interactive`) flag auto-confirms every prompt. Leave it
+off when you want to use the interactive pickers described below.
 
 ### scan — Check All Tools for Updates
 
@@ -285,6 +291,23 @@ its source. Output:
 
 Upgrade types: `new` (no version deployed), `patch`, `minor`, `major`,
 `up to date`, `ahead` (deployed version is newer than source).
+
+Scan also writes the list of discoverable versions to each tool's
+`available` field in `tools.json`. Other commands (toolset bump picker,
+apply) use that list, so running `scan` first makes them more useful.
+
+**Interactive scan** — omit `-n` and scan prompts for each stale tool:
+
+```bash
+$DEPLOY scan $IOPTS
+```
+
+```
+  hello-cli   1.0.0  ->  2.0.0  (major)
+Upgrade hello-cli to 2.0.0? [y/N] y
+```
+
+A quick way to apply a handful of upgrades without typing each one out.
 
 ### deploy — Deploy a Specific Version
 
@@ -336,16 +359,202 @@ Users can then load everything with a single command:
 module load demo-suite/1.0.0
 ```
 
+### toolset list — Inventory All Toolsets
+
+```bash
+$DEPLOY toolset list $OPTS
+```
+
+Prints each toolset with its format (dict or legacy list), version,
+and member count. Useful as a quick overview:
+
+```
+  demo-suite  dict   1.0.0       2 tool(s)
+```
+
+### toolset show — Inspect a Single Toolset
+
+```bash
+$DEPLOY toolset show demo-suite $OPTS
+```
+
+Prints the toolset's format, version, and every member with its pinned
+version and deployed-status flag:
+
+```
+  Toolset:  demo-suite
+  Format:   dict
+  Version:  1.0.0
+  Tools:
+    calculator  1.0.0
+    hello-cli   1.0.0
+```
+
+Members with no on-disk directory are flagged `[NOT deployed]` — a
+quick way to spot drift between the manifest and the filesystem before
+running `apply`.
+
+### toolset bump — Re-pin Versions in a Dict Toolset
+
+Only applies to dict-format toolsets (those with a `version` field and
+a `tools: {}` map). It rewrites the manifest pins and the toolset's own
+version. **It does not deploy** — follow up with `apply`.
+
+**Flag-driven** (scriptable, CI-friendly):
+
+```bash
+$DEPLOY toolset bump demo-suite \
+    --tool hello-cli=2.0.0 --tool calculator=1.1.0 \
+    --version 1.1.0 \
+    $OPTS
+```
+
+Each `--tool NAME=VERSION` updates one pin; `--version X.Y.Z` bumps the
+toolset's own version. Pass either, both, or many `--tool` flags.
+
+**Interactive** (no `--tool` / `--version` flags, and run without `-n`):
+
+```bash
+$DEPLOY toolset bump demo-suite $IOPTS
+```
+
+Walks you through every member tool one at a time. For each tool the
+menu shows the current pin, any versions discovered by `scan`, and a
+"custom" entry for typing anything:
+
+```
+  hello-cli  current=1.0.0  [available: 1.0.0, 1.1.0, 2.0.0]
+    1) keep 1.0.0
+    2) 1.1.0
+    3) 2.0.0
+    4) custom
+  Select version for 'hello-cli' [1-4]:
+```
+
+Press Enter to keep the current pin. After the per-tool loop it asks
+for the toolset's own version (with patch/minor/major suggestions) and
+then prints a summary and a final `Write manifest? [y/N]` confirmation.
+Answer `n` to abort without writing.
+
+Run `$DEPLOY scan $OPTS` first if you want the picker to list
+up-to-date `available` versions.
+
+### toolset migrate — Convert Legacy List to Dict
+
+If a toolset is still in the old list form (`"demo-suite": ["hello-cli",
+"calculator"]`), `migrate` converts it to dict form pinning each member
+at its current deployed version:
+
+```bash
+$DEPLOY toolset migrate demo-suite --version 1.0.0 $OPTS
+```
+
+After migration you can use `bump` and `apply` on it. Omit `--version`
+to default to `1.0.0`. Migrate errors out if any member has no recorded
+version — deploy those first.
+
+### apply — Reconcile Disk with Toolset Pins
+
+```bash
+$DEPLOY apply $OPTS
+$DEPLOY apply --toolset demo-suite $OPTS
+```
+
+For each dict-format toolset, `apply` deploys every tool+version pair
+that isn't already on disk, then regenerates the toolset modulefile.
+Think of it as the "GitOps reconcile" step — the manifest is the
+desired state, and `apply` brings the filesystem into alignment.
+
+Typical bump-then-apply flow:
+
+```bash
+# 1. Refresh 'available' lists so the picker is useful
+$DEPLOY scan $OPTS
+
+# 2. Edit pins (interactive or flag-driven)
+$DEPLOY toolset bump demo-suite $IOPTS
+
+# 3. Deploy the new pins and rewrite the toolset modulefile
+$DEPLOY apply --toolset demo-suite $OPTS
+```
+
+Legacy list toolsets are skipped by `apply` (they have no pins to
+reconcile) — convert them with `toolset migrate` first.
+
+### prune — Remove Old Versions, Keep the Newest N
+
+```bash
+$DEPLOY prune hello-cli --keep 2 $OPTS
+```
+
+Lists installed versions, keeps the `N` newest plus any pinned by a
+dict toolset, and removes the rest (deploy dir **and** modulefile).
+Always prompts for confirmation unless `-n` is set:
+
+```
+  Will remove 1 version(s) of hello-cli:
+    - 1.0.0
+  Keeping: 1.1.0, 2.0.0
+Proceed with removal? [y/N]
+```
+
+Pinned versions are never removed — even if they fall outside `--keep`
+— so a toolset can never be orphaned by pruning.
+
+### remove — Delete a Single Deployed Version
+
+```bash
+$DEPLOY remove hello-cli --version 1.1.0 $OPTS
+```
+
+Targets one specific version. Refuses to run if that version is pinned
+by any toolset unless you add `--force`:
+
+```
+  hello-cli 1.1.0 is pinned by toolset(s): demo-suite.
+  Run 'deploy.sh toolset bump' to re-pin, or pass --force.
+```
+
+The safer fix is usually to `bump` the toolset off that version first,
+then `remove` it.
+
 ### --dry-run — Preview Without Changes
 
 Append `--dry-run` to any command to see what would happen without
-making any changes:
+making any changes. Every write operation (clone, extract, modulefile
+write, manifest save) is skipped, but all validation still runs — so
+this is the easiest way to sanity-check a manifest edit:
 
 ```bash
 $DEPLOY deploy calculator --version 1.1.0 $OPTS --dry-run
 $DEPLOY upgrade hello-cli $OPTS --dry-run
 $DEPLOY toolset demo-suite --version 2.0.0 $OPTS --dry-run
+$DEPLOY toolset bump demo-suite --tool hello-cli=2.0.0 $OPTS --dry-run
+$DEPLOY apply $OPTS --dry-run
+$DEPLOY prune hello-cli --keep 1 $OPTS --dry-run
+$DEPLOY remove hello-cli --version 1.1.0 $OPTS --dry-run
 ```
+
+### End-to-End Walkthrough
+
+A realistic sequence from "fresh environment" to "toolset updated and
+deployed":
+
+```bash
+./setup.sh                                       # initial deploy of v1.0.0
+
+$DEPLOY scan $OPTS                               # discover newer versions
+$DEPLOY upgrade hello-cli $OPTS                  # ship hello-cli 2.0.0
+$DEPLOY upgrade calculator $OPTS                 # ship calculator 1.1.0
+
+$DEPLOY toolset bump demo-suite $IOPTS           # interactively re-pin
+$DEPLOY apply --toolset demo-suite $OPTS         # deploy pins + modulefile
+$DEPLOY prune hello-cli --keep 2 $OPTS           # clean up old 1.0.0
+```
+
+At the end, `tools.json` reflects the new state, every pinned version
+is on disk, and obsolete copies are gone. Run `git diff manifest/tools.json`
+to see the audit trail.
 
 ## Global CLI Options
 

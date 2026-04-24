@@ -9,6 +9,7 @@ import tarfile
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -2359,8 +2360,92 @@ class TestToolsetHelperCmds(unittest.TestCase):
             )
 
     def test_toolset_bump_requires_updates(self):
+        # Non-interactive mode: no flags means error (preserves CI safety).
         with self.assertRaises(SystemExit):
             cmd_toolset_bump("pinned", [], "", _make_args(), self._config())
+
+    def test_toolset_bump_interactive_keeps_all(self):
+        # Interactive mode, user presses Enter for every prompt -> no changes.
+        inputs = iter(["", "", ""])  # alpha, beta, toolset version
+        with mock.patch("builtins.input", lambda *a, **k: next(inputs)):
+            cmd_toolset_bump(
+                "pinned", [], "",
+                _make_args(non_interactive=False), self._config(),
+            )
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        # Nothing changed
+        self.assertEqual(data["toolsets"]["pinned"]["version"], "1.0.0")
+        self.assertEqual(
+            data["toolsets"]["pinned"]["tools"],
+            {"alpha": "1.0.0", "beta": "2.0.0"},
+        )
+
+    def test_toolset_bump_interactive_updates_pins(self):
+        # Populate 'available' so the picker has entries.
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        data["tools"]["alpha"]["available"] = ["1.0.0", "1.1.0", "2.0.0"]
+        data["tools"]["beta"]["available"] = ["2.0.0", "2.1.0"]
+        with open(self.manifest_path, "w") as f:
+            json.dump(data, f)
+
+        # Options for alpha: 1)keep 2)1.1.0 3)2.0.0 4)custom  -> pick 3
+        # Options for beta:  1)keep 2)2.1.0 3)custom          -> pick 2
+        # Toolset version:   1)keep 2)patch 3)minor 4)major 5)custom -> pick 3 (minor)
+        # Final confirm prompt for "Write manifest?" -> "y"
+        inputs = iter(["3", "2", "3", "y"])
+        with mock.patch("builtins.input", lambda *a, **k: next(inputs)):
+            cmd_toolset_bump(
+                "pinned", [], "",
+                _make_args(non_interactive=False), self._config(),
+            )
+
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["alpha"], "2.0.0")
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["beta"], "2.1.0")
+        self.assertEqual(data["toolsets"]["pinned"]["version"], "1.1.0")
+
+    def test_toolset_bump_interactive_custom_version(self):
+        # alpha: custom 3.0.0; beta: keep; toolset: custom 5.0.0; confirm yes
+        inputs = iter([
+            str(len(["keep", "custom"])),  # alpha: "custom" (last option, index 2)
+            "3.0.0",                        # alpha custom value
+            "",                             # beta: keep (empty input)
+            "5",                            # toolset: custom (5 options with suggestions)
+            "5.0.0",                        # toolset custom value
+            "y",                            # confirm
+        ])
+        with mock.patch("builtins.input", lambda *a, **k: next(inputs)):
+            cmd_toolset_bump(
+                "pinned", [], "",
+                _make_args(non_interactive=False), self._config(),
+            )
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["alpha"], "3.0.0")
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["beta"], "2.0.0")
+        self.assertEqual(data["toolsets"]["pinned"]["version"], "5.0.0")
+
+    def test_toolset_bump_interactive_abort(self):
+        # Choose a change, then answer "n" to the final confirm.
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        data["tools"]["alpha"]["available"] = ["1.0.0", "1.1.0"]
+        with open(self.manifest_path, "w") as f:
+            json.dump(data, f)
+
+        inputs = iter(["2", "", "", "n"])  # alpha 1.1.0, beta keep, ts keep, abort
+        with mock.patch("builtins.input", lambda *a, **k: next(inputs)):
+            cmd_toolset_bump(
+                "pinned", [], "",
+                _make_args(non_interactive=False), self._config(),
+            )
+        with open(self.manifest_path) as f:
+            data = json.load(f)
+        # Unchanged — aborted before save.
+        self.assertEqual(data["toolsets"]["pinned"]["tools"]["alpha"], "1.0.0")
 
     def test_toolset_migrate_converts_legacy(self):
         cmd_toolset_migrate("legacy", "2.0.0", _make_args(), self._config())

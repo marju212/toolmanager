@@ -44,7 +44,7 @@ if _SCRIPT_DIR not in sys.path:
 
 from lib.log import log_info, log_warn, log_error, log_success
 from lib.config import load_config
-from lib.semver import validate_semver
+from lib.semver import validate_semver, suggest_versions
 from lib.manifest import (
     load_manifest, save_manifest, get_tool, set_tool_version,
     get_toolset, get_toolset_tool_versions, get_toolset_version,
@@ -74,7 +74,7 @@ Subcommands:
   toolset  <name> [--version X.Y.Z]     Write modulefile for a named toolset
   toolset  list                         List every toolset
   toolset  show <name>                  Show a toolset's contents + deploy status
-  toolset  bump <name> --tool N=V ...   Update a dict toolset's pins
+  toolset  bump <name> [--tool N=V ...] Update a dict toolset's pins (interactive if no --tool)
   toolset  migrate <name> [--version X] Convert legacy list toolset to dict
   apply    [--toolset <name>]           Deploy all versions referenced by toolsets
   prune    <tool> --keep N              Remove old versions, keep N newest + pinned
@@ -116,7 +116,8 @@ USAGE_TOOLSET = """\
 Usage: deploy.py toolset <name> [--version X.Y.Z] [OPTIONS]
        deploy.py toolset list
        deploy.py toolset show <name>
-       deploy.py toolset bump <name> --tool NAME=VERSION [--tool ...] [--version X.Y.Z]
+       deploy.py toolset bump <name> [--tool NAME=VERSION ...] [--version X.Y.Z]
+           (drops into an interactive prompt when no --tool/--version given)
        deploy.py toolset migrate <name> [--version X.Y.Z]
 
 Without a sub-verb, writes a modulefile for the named toolset using current
@@ -1509,6 +1510,118 @@ def cmd_toolset_show(name: str, args: dict, config) -> None:
         print(f"    {tname:<{name_w}}  {tver or '(none)':<10}{flag_str}")
 
 
+def _prompt_bump_tool_version(
+    tool_name: str, current: str, available: list,
+) -> str:
+    """Prompt for a single tool's new pin. Returns "" to keep current."""
+    options = []  # list of (label, result) where result "" means keep
+    options.append((f"keep {current}", ""))
+    for v in available:
+        if v != current:
+            options.append((v, v))
+    options.append(("custom", "__CUSTOM__"))
+
+    print("", file=sys.stderr)
+    avail_hint = f"  [available: {', '.join(available)}]" if available else ""
+    print(f"  {tool_name}  current={current}{avail_hint}", file=sys.stderr)
+    for i, (label, _) in enumerate(options, start=1):
+        print(f"    {i}) {label}", file=sys.stderr)
+
+    while True:
+        try:
+            choice = input(
+                f"Select version for '{tool_name}' [1-{len(options)}]: "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            raise SystemExit(1)
+        if not choice:
+            return ""
+        if not choice.isdigit() or not (1 <= int(choice) <= len(options)):
+            log_error(f"Invalid choice: '{choice}'.")
+            continue
+        _, result = options[int(choice) - 1]
+        if result == "__CUSTOM__":
+            try:
+                custom = input("  Enter version (X.Y.Z): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("", file=sys.stderr)
+                raise SystemExit(1)
+            try:
+                validate_semver(custom)
+            except ValueError as e:
+                log_error(str(e))
+                continue
+            return custom
+        return result
+
+
+def _prompt_bump_toolset_version(current: str) -> str:
+    """Prompt for the toolset's own new version. Returns "" to keep current."""
+    print("", file=sys.stderr)
+    print(f"Toolset version (current: {current})", file=sys.stderr)
+    options = [(f"keep {current}", "")]
+    if current:
+        try:
+            sug = suggest_versions(current)
+            options.extend([
+                (f"patch \u2192 {sug['patch']}", sug["patch"]),
+                (f"minor \u2192 {sug['minor']}", sug["minor"]),
+                (f"major \u2192 {sug['major']}", sug["major"]),
+            ])
+        except ValueError:
+            pass
+    options.append(("custom", "__CUSTOM__"))
+    for i, (label, _) in enumerate(options, start=1):
+        print(f"  {i}) {label}", file=sys.stderr)
+
+    while True:
+        try:
+            choice = input(f"Select [1-{len(options)}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("", file=sys.stderr)
+            raise SystemExit(1)
+        if not choice:
+            return ""
+        if not choice.isdigit() or not (1 <= int(choice) <= len(options)):
+            log_error(f"Invalid choice: '{choice}'.")
+            continue
+        _, result = options[int(choice) - 1]
+        if result == "__CUSTOM__":
+            try:
+                custom = input("  Enter version (X.Y.Z): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("", file=sys.stderr)
+                raise SystemExit(1)
+            try:
+                validate_semver(custom)
+            except ValueError as e:
+                log_error(str(e))
+                continue
+            return custom
+        return result
+
+
+def _interactive_bump(data: dict, name: str, ts_entry: dict) -> tuple:
+    """Drive the interactive bump flow. Returns (parsed_updates, new_ts_version)."""
+    print("", file=sys.stderr)
+    print(
+        f"Bump toolset '{name}' (version {ts_entry.get('version', '')})",
+        file=sys.stderr,
+    )
+    parsed_updates = {}
+    for tname, tver in ts_entry.get("tools", {}).items():
+        available = (
+            data.get("tools", {}).get(tname, {}).get("available", []) or []
+        )
+        chosen = _prompt_bump_tool_version(tname, tver, available)
+        if chosen and chosen != tver:
+            parsed_updates[tname] = chosen
+
+    new_ts_version = _prompt_bump_toolset_version(ts_entry.get("version", ""))
+    return parsed_updates, new_ts_version
+
+
 def cmd_toolset_bump(
     name: str,
     tool_updates: list,
@@ -1520,6 +1633,10 @@ def cmd_toolset_bump(
 
     *tool_updates* is a list of ``"tool=X.Y.Z"`` strings.  Writes the manifest;
     deploying the new pins is a separate step (``apply``).
+
+    When no *tool_updates* and no *new_ts_version* are given, drops into an
+    interactive prompt loop (unless ``--non-interactive`` is set, in which
+    case it errors as before — preserving CI safety).
     """
     manifest_path = resolve_manifest_path(config)
     data = load_manifest(manifest_path)
@@ -1566,8 +1683,33 @@ def cmd_toolset_bump(
         parsed_updates[tname] = tver
 
     if not parsed_updates and not new_ts_version:
-        log_error("Nothing to bump — pass --tool NAME=VERSION and/or --version.")
-        raise SystemExit(EXIT_CONFIG)
+        if args["non_interactive"]:
+            log_error(
+                "Nothing to bump — pass --tool NAME=VERSION and/or --version."
+            )
+            raise SystemExit(EXIT_CONFIG)
+        parsed_updates, new_ts_version = _interactive_bump(data, name, ts_entry)
+        if not parsed_updates and not new_ts_version:
+            log_info("No changes selected. Nothing to do.")
+            return
+        print("", file=sys.stderr)
+        print("Summary of changes:", file=sys.stderr)
+        for tname, tver in parsed_updates.items():
+            old = ts_entry["tools"].get(tname, "(new)")
+            print(f"  {tname}: {old} \u2192 {tver}", file=sys.stderr)
+        if new_ts_version:
+            print(
+                f"  {name} version: "
+                f"{ts_entry.get('version', '')} \u2192 {new_ts_version}",
+                file=sys.stderr,
+            )
+        if not confirm(
+            "Write manifest?",
+            dry_run=args["dry_run"],
+            non_interactive=args["non_interactive"],
+        ):
+            log_info("Aborted.")
+            return
 
     for tname, tver in parsed_updates.items():
         ts_entry["tools"][tname] = tver
